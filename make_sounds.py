@@ -157,11 +157,22 @@ def grab():
     return normalize(lowpass(s, 2500) * np.exp(-t * 4), 0.6)
 
 
+def pulse():
+    # pulsar: an electric buzz with a crackle on top
+    seconds = 0.42
+    t = t_axis(seconds)
+    n = len(t)
+    buzz = np.sign(np.sin(2 * np.pi * 110 * t)) * 0.6 + np.sign(np.sin(2 * np.pi * 165.5 * t)) * 0.4
+    crackle = rng.uniform(-1, 1, n) * (rng.uniform(0, 1, n) < 0.25)
+    env = np.minimum(1, t / 0.01) * np.minimum(1, (seconds - t) / 0.08)
+    return normalize(lowpass(buzz + crackle * 0.8, 4000) * env, 0.5)
+
+
 SOUNDS = [
     ("fire", fire), ("enemy_die", enemy_die), ("tanker_split", tanker_split),
     ("move", move), ("zapper", zapper), ("warp", warp), ("death", death),
     ("spike_hit", spike_hit), ("enemy_fire", enemy_fire), ("level_start", level_start),
-    ("extra_life", extra_life), ("grab", grab),
+    ("extra_life", extra_life), ("grab", grab), ("pulse", pulse),
 ]
 
 # music instruments come last (see make_music.py and chipmusic.h)

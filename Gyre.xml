@@ -18,6 +18,7 @@
         <sound path="sounds/level_start.vsnd" />
         <sound path="sounds/extra_life.vsnd" />
         <sound path="sounds/grab.vsnd" />
+        <sound path="sounds/pulse.vsnd" />
         <sound path="sounds/ins_pulse12.vsnd" />
         <sound path="sounds/ins_pulse25.vsnd" />
         <sound path="sounds/ins_pulse50.vsnd" />

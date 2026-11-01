@@ -1,6 +1,6 @@
 # Gyre for Vircon32
 
-Version 0.2: the playable core plus high scores, options, a pause menu and an attract demo. A tube shooter in the style of Tempest, built with `vector.h`.
+Version 0.3: all five enemy types, high scores, options, a pause menu and an attract demo. A tube shooter in the style of Tempest, built with `vector.h`.
 
 Load **Gyre.v32** in the Vircon32 emulator.
 
@@ -21,6 +21,10 @@ Your claw rides the rim of a wireframe tube. Enemies climb up the lanes from the
 - **Flipper** (red bow tie): climbs, flipping between lanes now and then, and sometimes fires. On the rim it flips toward you and grabs the claw.
 - **Tanker** (purple diamond, from level 2): splits into two flippers when shot or when it reaches the rim.
 - **Spiker** (green spiral, from level 3): climbs partway, leaving a spike in its lane, then retreats. Shoot spikes to shorten them.
+- **Fuseball** (spinning multicolored burst, from level 4): travels along the lane edges, climbing in fits and starts and hopping sideways. It can only be shot while it's crossing the middle of a lane, and it's worth 250, 500 or 750 points, more the deeper it is. On the rim it rolls toward you and destroys the claw if it crosses through your lane. It rolls slowly enough there that holding fire always gets a shot at it first.
+- **Pulsar** (orange zigzag, from level 5): climbs to a set depth, then flips toward you. Every few seconds its lane flickers as a warning, then the whole lane is electrified for a moment, destroying the claw if it's in that lane. Worth 200.
+
+Levels 4 and 5 show a one-line note about the new enemy under the level banner.
 
 **Levels.** When a level's last enemy is gone, the claw dives down the tube to the next web. A spike in your lane during the dive destroys you, so move to a clear lane or shoot the spike away first.
 
@@ -53,6 +57,8 @@ The top five scores are kept with initials. On the entry screen, Up and Down cha
 | Time between spawns | ×1.3 | ×1 | ×0.8 |
 | Flipper shots | Fewer | Standard | More |
 | Flippers on the rim | Slower to flip | Standard | Quicker |
+| Fuseballs on the rim | Pause longer between rolls | Standard | Pause less |
+| Pulsars | Pulse less often, longer warning | Standard | Pulse more often, shorter warning |
 | Enemy shot speed | ×0.85 | ×1 | ×1.15 |
 
 ## Attract mode
@@ -63,7 +69,7 @@ The demo is a real replay: each game records its inputs (the first 60 seconds) a
 
 ## Memory card
 
-Insert a card and Gyre saves the table, the demo and the options. A blank card is claimed with the signature `GYRE TUBE SHOOTER V1`; a card belonging to another game is never written to. Each part has its own checksum, and damaged parts are ignored. The layout is the same as Rockfield's (format version 1 here):
+Insert a card and Gyre saves the table, the demo and the options. Cards saved by 0.2 (format 1) keep their table and options, but their demo is dropped, because it was recorded before fuseballs and pulsars existed. A blank card is claimed with the signature `GYRE TUBE SHOOTER V1`; a card belonging to another game is never written to. Each part has its own checksum, and damaged parts are ignored. The layout is the same as Rockfield's (format version 2 here):
 
 | Words | Contents |
 |---|---|
@@ -108,6 +114,6 @@ packrom Gyre.xml -o Gyre.v32
 - `begin_game()` resets every piece of gameplay state.
 - After changing a gameplay rule, regenerate `demo_builtin.h` and bump the card format version.
 
-## Not yet in 0.2
+## Next
 
-- More enemy types: fuseballs and pulsars.
+- More level variety: more web shapes, and a steeper climb after the first six levels.

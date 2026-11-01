@@ -11,7 +11,7 @@
 // =============================================================================
 
 #define VEC_MAX_LINES 1100
-#define GYRE_VERSION "V0.2"
+#define GYRE_VERSION "V0.3"
 
 #include "video.h"
 #include "math.h"
@@ -41,7 +41,8 @@
 #define SND_LEVEL_START  9
 #define SND_EXTRA_LIFE   10
 #define SND_GRAB         11
-#define SND_INSTRUMENTS  12       // 8 music instrument samples (chipmusic.h)
+#define SND_PULSE        12
+#define SND_INSTRUMENTS  13       // 8 music instrument samples (chipmusic.h)
 
 #define CH_MUSIC      0           // music uses channels 0-6
 #define CH_FIRST_SFX  7
@@ -358,7 +359,7 @@ void table_merge( int value, int name )
 //   MEMORY CARD
 // -----------------------------------------------------------------------------
 //   Same layout as Rockfield, under Gyre's own signature (word offsets):
-//     0-19 signature   20 format version (1)   21-25 scores   26-30 names
+//     0-19 signature   20 format version (2; format 1 loads without its demo)   21-25 scores   26-30 names
 //     31-33 demo seed, length, score   34 checksum of 21-33
 //     35 checksum of the demo   36 options   37 checksum of 36 and 38
 //     38 demo difficulty   40- demo recording (REC_WORDS words)
@@ -373,7 +374,7 @@ void table_merge( int value, int name )
 #define SAVE_HEADER     16
 #define SAVE_EXTRA_AT   36
 #define SAVE_DEMO_AT    40
-#define SAVE_VERSION    1
+#define SAVE_VERSION    2         // 2: fuseballs and pulsars (v1 demos are dropped)
 #define SAVE_KEY        0x2F6A9B3D
 
 #define SAVE_MSG_NONE      0
@@ -428,7 +429,7 @@ void load_save()
     bool extra_ok;
 
     card_read_data( save_header, SAVE_OFFSET, SAVE_HEADER );
-    if( save_header[ 0 ] != SAVE_VERSION ) return;
+    if( save_header[ 0 ] != SAVE_VERSION && save_header[ 0 ] != 1 ) return;
     if( save_header[ 14 ] != checksum( &save_header[ 1 ], 13 ) ) return;
 
     card_read_data( save_extra, SAVE_EXTRA_AT, 3 );
@@ -442,7 +443,9 @@ void load_save()
     for( i = 0; i < HS_COUNT; i++ )
       table_merge( save_header[ 1 + i ], save_header[ 6 + i ] );
 
-    if( save_header[ 13 ] > demo_score && save_header[ 12 ] > 0 && save_header[ 12 ] <= REC_MAX_FRAMES )
+    // a format 1 demo was recorded before fuseballs and pulsars and might not replay
+    if( save_header[ 0 ] == SAVE_VERSION && save_header[ 13 ] > demo_score
+        && save_header[ 12 ] > 0 && save_header[ 12 ] <= REC_MAX_FRAMES )
     {
         card_read_data( card_demo, SAVE_DEMO_AT, REC_WORDS );
         if( save_header[ 15 ] == checksum( card_demo, REC_WORDS ) )
@@ -846,6 +849,8 @@ void burst_at( int lane, float z, int count, float speed, int color )
 #define EN_FLIPPER   0
 #define EN_TANKER    1
 #define EN_SPIKER    2
+#define EN_FUSEBALL  3                // rides the lane edges; hittable only while crossing a lane
+#define EN_PULSAR    4                // electrifies its lane every few seconds
 
 #define ES_CLIMB     0
 #define ES_RIM       1                // flipper on the rim, hunting the claw
@@ -864,6 +869,13 @@ float[ MAX_ENEMIES ] en_target;       // spiker: how high it climbs
 int[ MAX_ENEMIES ] en_timer;
 int[ MAX_ENEMIES ] en_flip_to;        // -1 when not flipping
 float[ MAX_ENEMIES ] en_flip_t;
+float[ MAX_ENEMIES ] en_side;         // fuseball: 0 = left edge of its lane, 1 = right edge
+int[ MAX_ENEMIES ] en_dir;            // fuseball: crossing direction (0 = resting on an edge)
+float[ MAX_ENEMIES ] en_zdir;         // fuseball: climbing (+) or backing off (-)
+int[ MAX_ENEMIES ] en_pulse;          // pulsar: countdown to its next pulse
+
+#define PULSE_FRAMES 24
+int hint_timer = 0;                   // "new enemy" note under the level banner
 
 int spawn_total;                      // enemies this level
 int spawned;
@@ -900,6 +912,19 @@ int spawn_enemy( int type, int lane, float z )
           if( type == EN_TANKER ) en_speed[ i ] *= 0.7;
           if( type == EN_SPIKER ) en_speed[ i ] *= 1.3;
           en_target[ i ] = frand_range( 0.9, 2.3 );
+          en_side[ i ] = 0;
+          en_dir[ i ] = 0;
+          en_zdir[ i ] = 1;
+          en_pulse[ i ] = 0;
+          // the new types draw extra random numbers only for themselves, so
+          // levels without them play out exactly as before
+          if( type == EN_PULSAR )
+          {
+              en_speed[ i ] *= 0.6;
+              en_target[ i ] = 0.4 + ( en_target[ i ] - 0.9 ) * 0.3;     // hunts from 0.4-0.82 deep
+              en_pulse[ i ] = 100 + grand() % 60;
+          }
+          if( type == EN_FUSEBALL ) en_timer[ i ] = 20 + grand() % 40;
           return i;
       }
     return -1;
@@ -909,6 +934,8 @@ int spawn_enemy( int type, int lane, float z )
 int pick_enemy_type()
 {
     int r = grand() % 100;
+    if( level >= 5 && r >= 88 ) return EN_PULSAR;
+    if( level >= 4 && r >= 76 ) return EN_FUSEBALL;
     if( level >= 3 && r < 20 ) return EN_SPIKER;
     if( level >= 2 && r < 42 ) return EN_TANKER;
     return EN_FLIPPER;
@@ -947,9 +974,19 @@ void kill_enemy( int i, bool split )
 
     if( en_type[ i ] == EN_FLIPPER ) add_score( 150 );
     else if( en_type[ i ] == EN_SPIKER ) add_score( 50 );
+    else if( en_type[ i ] == EN_PULSAR ) add_score( 200 );
+    else if( en_type[ i ] == EN_FUSEBALL )
+    {
+        // worth more the deeper it is
+        if( en_z[ i ] > 2.6 ) add_score( 750 );
+        else if( en_z[ i ] > 1.3 ) add_score( 500 );
+        else add_score( 250 );
+    }
     else add_score( 100 );
 
     burst_at( en_lane[ i ], en_z[ i ], 14, 2.5, 0xFFFFFFFF );
+    if( en_type[ i ] == EN_FUSEBALL ) burst_at( en_lane[ i ], en_z[ i ], 10, 1.6, 0xFF40FF40 );
+    if( en_type[ i ] == EN_PULSAR ) burst_at( en_lane[ i ], en_z[ i ], 10, 1.6, 0xFF2090FF );
     if( !quiet_kills ) sfx_pitched( SND_ENEMY_DIE, 0.45, fx_range( 0.9, 1.1 ) );
     en_active[ i ] = false;
 }
@@ -1054,6 +1091,8 @@ void start_level()
     zapper_uses = 0;
 
     spawn_total = min( 8 + level * 2, 32 );
+    hint_timer = 0;
+    if( level == 4 || level == 5 ) hint_timer = 330;
     spawned = 0;
     spawn_timer = 90;
 
@@ -1530,7 +1569,8 @@ void update_shots()
           // enemies: anything the shot passed through this frame
           for( e = 0; e < MAX_ENEMIES; e++ )
             if( en_active[ e ] && enemy_lane( e ) == shot_lane[ s ]
-                && en_z[ e ] >= z_old - 0.12 && en_z[ e ] <= shot_z[ s ] + 0.12 )
+                && en_z[ e ] >= z_old - 0.12 && en_z[ e ] <= shot_z[ s ] + 0.12
+                && ( en_type[ e ] != EN_FUSEBALL || ( en_side[ e ] > 0.1 && en_side[ e ] < 0.9 ) ) )
             {
                 shot_active[ s ] = false;
                 kill_enemy( e, true );
@@ -1564,6 +1604,120 @@ void update_shots()
       }
 }
 
+// starts a fuseball crossing a lane; dir +1 = toward higher lanes
+void start_fuse_hop( int i, int dir )
+{
+    int other;
+    if( dir > 0 && en_side[ i ] >= 1 )
+    {
+        other = lane_wrap( en_lane[ i ] + 1 );
+        if( other < 0 ) dir = -1;                   // end of an open web: turn back
+        else { en_lane[ i ] = other; en_side[ i ] = 0; }
+    }
+    else if( dir < 0 && en_side[ i ] <= 0 )
+    {
+        other = lane_wrap( en_lane[ i ] - 1 );
+        if( other < 0 ) dir = 1;
+        else { en_lane[ i ] = other; en_side[ i ] = 1; }
+    }
+    en_dir[ i ] = dir;
+}
+
+void update_fuseball( int i )
+{
+    int d;
+
+    if( en_dir[ i ] != 0 )
+    {
+        // crossing a lane: the only time it can be shot. On the rim it rolls
+        // slowly enough that auto-fire (a shot every 6 frames) always gets a
+        // chance at it before it reaches the middle of the claw's lane
+        if( en_state[ i ] == ES_RIM ) en_side[ i ] += en_dir[ i ] * 0.04;
+        else en_side[ i ] += en_dir[ i ] * ( 0.05 + level * 0.002 );
+        if( en_side[ i ] >= 1 ) { en_side[ i ] = 1; en_dir[ i ] = 0; }
+        if( en_side[ i ] <= 0 ) { en_side[ i ] = 0; en_dir[ i ] = 0; }
+        return;
+    }
+
+    en_timer[ i ]--;
+
+    if( en_state[ i ] == ES_CLIMB )
+    {
+        // climbs in fits and starts, sometimes backing off
+        en_z[ i ] -= en_speed[ i ] * en_zdir[ i ];
+        if( en_z[ i ] > DEPTH ) { en_z[ i ] = DEPTH; en_zdir[ i ] = 1.2; }
+
+        if( en_timer[ i ] <= 0 )
+        {
+            d = grand() % 100;
+            en_timer[ i ] = 25 + grand() % 50;
+            en_zdir[ i ] = 1.2;
+            if( d < 55 ) start_fuse_hop( i, 1 - 2 * ( grand() % 2 ) );
+            else if( d < 75 ) en_zdir[ i ] = -0.7;
+        }
+
+        if( en_z[ i ] <= 0 )
+        {
+            en_z[ i ] = 0;
+            en_state[ i ] = ES_RIM;
+            en_timer[ i ] = 15;
+        }
+    }
+    else
+    {
+        // on the rim: rolls from edge to edge toward the claw
+        if( en_timer[ i ] <= 0 )
+        {
+            d = lane_delta( en_lane[ i ], claw_lane );
+            if( ( en_side[ i ] <= 0 && d >= 0 ) || ( en_side[ i ] >= 1 && d > 0 ) ) start_fuse_hop( i, 1 );
+            else start_fuse_hop( i, -1 );
+            en_timer[ i ] = diff_pick( 26, 18, 12 ) + grand() % 10;
+        }
+    }
+}
+
+// returns true when its pulse destroyed the claw
+bool update_pulsar( int i )
+{
+    int d, charge = diff_pick( 50, 40, 32 );
+
+    // climbs slowly to its hunting depth, flipping now and then
+    if( en_z[ i ] > en_target[ i ] )
+    {
+        en_z[ i ] -= en_speed[ i ];
+        if( en_z[ i ] < en_target[ i ] ) en_z[ i ] = en_target[ i ];
+    }
+
+    en_timer[ i ]--;
+    if( en_timer[ i ] <= 0 && en_flip_to[ i ] < 0 && en_pulse[ i ] > charge )
+    {
+        if( en_z[ i ] <= en_target[ i ] )
+        {
+            d = lane_delta( en_lane[ i ], claw_lane );
+            if( d > 0 ) start_flip( i, 1 );
+            else if( d < 0 ) start_flip( i, -1 );
+            en_timer[ i ] = 50 + grand() % 40;
+        }
+        else
+        {
+            start_flip( i, 1 - 2 * ( grand() % 2 ) );
+            en_timer[ i ] = 90 + grand() % 70;
+        }
+    }
+
+    // pulse cycle: charge (the lane flickers), then the lane is live
+    en_pulse[ i ]--;
+    if( en_pulse[ i ] == 0 ) sfx( SND_PULSE, 0.45 );
+    if( en_pulse[ i ] <= -PULSE_FRAMES ) en_pulse[ i ] = diff_pick( 190, 150, 120 );
+
+    if( en_pulse[ i ] <= 0 && phase == PHASE_FIGHT && enemy_lane( i ) == claw_lane )
+    {
+        kill_claw();
+        return true;
+    }
+    return false;
+}
+
 void update_enemies()
 {
     int i, d;
@@ -1594,7 +1748,12 @@ void update_enemies()
             }
         }
 
-        if( en_state[ i ] == ES_CLIMB )
+        if( en_type[ i ] == EN_FUSEBALL ) update_fuseball( i );
+        else if( en_type[ i ] == EN_PULSAR )
+        {
+            if( update_pulsar( i ) ) return;
+        }
+        else if( en_state[ i ] == ES_CLIMB )
         {
             en_z[ i ] -= en_speed[ i ];
 
@@ -1649,7 +1808,8 @@ void update_enemies()
         }
 
         // touching the claw on the rim: grabbed
-        if( phase == PHASE_FIGHT && en_active[ i ] && en_z[ i ] < 0.15 && enemy_lane( i ) == claw_lane )
+        if( phase == PHASE_FIGHT && en_active[ i ] && en_z[ i ] < 0.15 && enemy_lane( i ) == claw_lane
+            && ( en_type[ i ] != EN_FUSEBALL || ( en_side[ i ] > 0.4 && en_side[ i ] < 0.6 ) ) )
         {
             sfx( SND_GRAB, 0.6 );
             kill_claw();
@@ -1726,6 +1886,8 @@ void update_playing()
 
     // logic projects explosions through the camera: aim it first
     set_camera();
+
+    if( hint_timer > 0 ) hint_timer--;
 
     // this logic frame's input: replayed, or read live and recorded
     if( demo_mode )
@@ -1940,6 +2102,97 @@ void draw_claw()
     vec_line_3d( cx, cy, z + 0.1, x1, y1, z );
 }
 
+// fuseball: five curly tendrils in different colors, spinning, sitting on a lane edge
+void draw_fuseball( int i )
+{
+    int k;
+    float x, y, px, py, s, a, bx, by;
+    int[ 5 ] colors;
+
+    colors[ 0 ] = 0xFF4040FF;  colors[ 1 ] = 0xFF40FFFF;  colors[ 2 ] = 0xFF40FF40;
+    colors[ 3 ] = 0xFFFFFF40;  colors[ 4 ] = 0xFFFF40FF;
+
+    x = lx( en_lane[ i ], -1, 0, en_side[ i ] );
+    y = ly( en_lane[ i ], -1, 0, en_side[ i ] );
+    if( !vec_project( x, y, en_z[ i ], &px, &py ) ) return;
+
+    s = FOCAL / ( en_z[ i ] - cam_z ) * 0.13;
+    vec_thickness( 2 );
+    vec_glow_size( 10 );
+    for( k = 0; k < 5; k++ )
+    {
+        a = anim * 0.18 + k * 1.2566;
+        bx = px + cos( a ) * s * 0.55;
+        by = py + sin( a ) * s * 0.55;
+        vec_color( colors[ k ], vec_scale_rgb( colors[ k ], 0.4 ) );
+        vec_line( px, py, bx, by );
+        vec_line( bx, by, px + cos( a + 0.7 ) * s, py + sin( a + 0.7 ) * s );
+    }
+}
+
+// pulsar: a zigzag across its lane that swells while charging; while it
+// pulses, its whole lane up to the rim is live
+void draw_pulsar( int i, float a0x, float a0y, float a1x, float a1y, float z )
+{
+    int k, lane, nxt, charge = diff_pick( 50, 40, 32 );
+    float amp = 0.09, t0, t1, z0, z1, j;
+    bool charging = en_pulse[ i ] > 0 && en_pulse[ i ] <= charge;
+    bool live = en_pulse[ i ] <= 0;
+
+    if( charging ) amp = 0.09 + 0.1 * ( 1 - en_pulse[ i ] / (float)charge );
+    if( live ) amp = 0.21;
+
+    vec_thickness( 2.5 );
+    vec_glow_size( 14 );
+    if( live ) vec_color( 0xFFFFFFFF, 0xFF2090FF );
+    else vec_color( 0xFF2090FF, 0xFF103060 );
+
+    for( k = 0; k < 6; k++ )
+    {
+        t0 = k / 6.0;
+        t1 = ( k + 1 ) / 6.0;
+        z0 = z + amp;  z1 = z - amp;
+        if( k % 2 ) { z0 = z - amp; z1 = z + amp; }
+        vec_line_3d( a0x + ( a1x - a0x ) * t0, a0y + ( a1y - a0y ) * t0, z0,
+                     a0x + ( a1x - a0x ) * t1, a0y + ( a1y - a0y ) * t1, z1 );
+    }
+
+    if( en_flip_to[ i ] >= 0 ) return;
+    lane = en_lane[ i ];
+    nxt = lane_next_point( lane );
+
+    if( charging && ( anim / 3 ) % 2 == 0 )
+    {
+        // warning: the lane edges flicker
+        vec_thickness( 2 );
+        vec_glow_size( 12 );
+        vec_color( 0xFF2080FF, 0xFF102040 );
+        vec_line_3d( web_x[ lane ], web_y[ lane ], 0, web_x[ lane ], web_y[ lane ], z );
+        vec_line_3d( web_x[ nxt ], web_y[ nxt ], 0, web_x[ nxt ], web_y[ nxt ], z );
+    }
+    else if( live )
+    {
+        // the lane is live: bright edges and a crackle down the middle
+        vec_thickness( 3 );
+        vec_glow_size( 18 );
+        vec_color( 0xFFC0F0FF, 0xFF2090FF );
+        vec_line_3d( web_x[ lane ], web_y[ lane ], 0, web_x[ lane ], web_y[ lane ], z );
+        vec_line_3d( web_x[ nxt ], web_y[ nxt ], 0, web_x[ nxt ], web_y[ nxt ], z );
+        vec_thickness( 1.5 );
+        t0 = 0.5;
+        z0 = 0;
+        for( k = 1; k <= 6; k++ )
+        {
+            z1 = z * k / 6.0;
+            j = fx_range( 0.25, 0.75 );
+            if( k == 6 ) j = 0.5;
+            vec_line_3d( lx( lane, -1, 0, t0 ), ly( lane, -1, 0, t0 ), z0, lx( lane, -1, 0, j ), ly( lane, -1, 0, j ), z1 );
+            t0 = j;
+            z0 = z1;
+        }
+    }
+}
+
 void draw_enemies()
 {
     int i, to;
@@ -1984,6 +2237,14 @@ void draw_enemies()
             vec_line_3d( cx, cy, z - 0.1, ( a1x + cx ) * 0.5, ( a1y + cy ) * 0.5, z );
             vec_line_3d( ( a1x + cx ) * 0.5, ( a1y + cy ) * 0.5, z, cx, cy, z + 0.1 );
             vec_line_3d( cx, cy, z + 0.1, ( a0x + cx ) * 0.5, ( a0y + cy ) * 0.5, z );
+        }
+        else if( en_type[ i ] == EN_FUSEBALL )
+        {
+            draw_fuseball( i );
+        }
+        else if( en_type[ i ] == EN_PULSAR )
+        {
+            draw_pulsar( i, a0x, a0y, a1x, a1y, z );
         }
         else
         {
@@ -2158,6 +2419,24 @@ void draw_hud()
         x = 320 - ( vec_text_width( "LEVEL ", 12 ) + number_width( level, 12 ) ) / 2;
         vec_text( "LEVEL", x, 150, 12 );
         vec_number( level, x + vec_text_width( "LEVEL ", 12 ), 150, 12 );
+        vec_intensity( 1 );
+    }
+
+    if( hint_timer > 0 )
+    {
+        vec_thickness( 1.8 );
+        vec_glow_size( 12 );
+        vec_intensity( fmin( 1.0, fmin( ( 330 - hint_timer ) / 15.0, hint_timer / 30.0 ) ) );
+        if( level == 4 )
+        {
+            vec_color( 0xFF60FF60, 0xFF186018 );
+            vec_text_centered( "FUSEBALLS - SHOOT THEM AS THEY CROSS A LANE", 320, 343, 5 );
+        }
+        else
+        {
+            vec_color( 0xFF2090FF, 0xFF103060 );
+            vec_text_centered( "PULSARS - STAY OUT OF A FLICKERING LANE", 320, 343, 5 );
+        }
         vec_intensity( 1 );
     }
 
