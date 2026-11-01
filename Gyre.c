@@ -11,7 +11,7 @@
 // =============================================================================
 
 #define VEC_MAX_LINES 1100
-#define GYRE_VERSION "V0.1"
+#define GYRE_VERSION "V0.2"
 
 #include "video.h"
 #include "math.h"
@@ -19,6 +19,8 @@
 #include "input.h"
 #include "audio.h"
 #include "misc.h"
+#include "memcard.h"
+#define VEC_MAX_LINES 1200     // menus draw their text over the web
 #include "vector.h"
 #include "music_data.h"
 #include "chipmusic.h"
@@ -45,12 +47,49 @@
 #define CH_FIRST_SFX  7
 
 int next_sfx_channel = CH_FIRST_SFX;
+bool sfx_muted = false;               // attract demo: effects off, music stays
+
+// player options (saved on the memory card)
+#define DIFF_NORMAL  0
+#define DIFF_EASY    1
+#define DIFF_HARD    2
+int opt_music = 10;                   // 0-10
+int opt_sfx = 10;                     // 0-10
+int opt_difficulty = DIFF_NORMAL;
+bool opt_shake = true;
+bool opt_flash = true;
+
+float music_base = 0.5;               // volume the current track asked for
+
+float sfx_level()
+{
+    return opt_sfx / 10.0;
+}
+
+void play_track( int track, float volume )
+{
+    music_base = volume;
+    music_play( track, volume * opt_music / 10.0 );
+}
+
+void apply_music_volume()
+{
+    music_set_volume( music_base * opt_music / 10.0 );
+}
+
+// stops every effect channel, leaving the music alone
+void stop_sfx_channels()
+{
+    int ch;
+    for( ch = CH_FIRST_SFX; ch < sound_channels; ch++ ) stop_channel( ch );
+}
 
 void sfx_pitched( int sound_id, float volume, float speed )
 {
+    if( sfx_muted ) return;
     stop_channel( next_sfx_channel );          // a busy channel ignores new sounds
     select_channel( next_sfx_channel );
-    set_channel_volume( volume );
+    set_channel_volume( volume * sfx_level() );
     set_channel_speed( speed );
     play_sound_in_channel( sound_id, next_sfx_channel );
 
@@ -88,9 +127,95 @@ float frand()
     return ( grand() % 10000 ) / 10000.0;
 }
 
+// effects-only generator (screen shake): drawing also runs while paused,
+// so it must never touch the gameplay generator
+int fx_state = 1;
+
+float fx_range( float a, float b )
+{
+    fx_state = xorshift( fx_state );
+    return a + ( b - a ) * ( ( fx_state & 0x7FFFFFFF ) % 10000 ) / 10000.0;
+}
+
 float frand_range( float a, float b )
 {
     return a + ( b - a ) * frand();
+}
+
+// -----------------------------------------------------------------------------
+//   INPUT (live or replayed) AND RECORDING
+// -----------------------------------------------------------------------------
+//   Game logic never reads the gamepad directly: each logic frame gets a
+//   6-bit input word, from the gamepad (and recorded) or from a recording.
+//   With the same seed and inputs a game replays exactly.
+
+#define IN_LEFT    1
+#define IN_RIGHT   2
+#define IN_UP      4
+#define IN_DOWN    8
+#define IN_FIRE    16
+#define IN_ZAP     32
+
+#define REC_MAX_FRAMES  3600      // 60 s of gameplay
+#define REC_WORDS       720       // 5 frames of 6 bits per word
+#define DEMO_MAX_PLAY   2700      // attract demo: 45 s at most
+#define DEMO_MIN_FRAMES 600       // shorter games never become the demo
+
+int in_bits = 0;
+int[ 6 ] in_held;                 // frames each input has been held (1 = just pressed)
+bool input_lock = false;          // after the pause menu: ignore B/A until released
+int game_frame = 0;
+int game_seed = 1;
+
+int[ REC_WORDS ] rec_data;
+int rec_frames = 0;
+
+bool demo_mode = false;
+int demo_pos = 0;
+int demo_seed = 0;
+int demo_frames = 0;
+int demo_score = 0;
+int demo_difficulty = 0;
+int[ REC_WORDS ] demo_data;
+
+int read_gamepad_bits()
+{
+    int bits = 0;
+    bool fire = gamepad_button_b() > 0 || gamepad_button_a() > 0;
+
+    if( input_lock && !fire ) input_lock = false;
+    if( input_lock ) fire = false;
+
+    if( gamepad_left() > 0 )  bits = bits | IN_LEFT;
+    if( gamepad_right() > 0 ) bits = bits | IN_RIGHT;
+    if( gamepad_up() > 0 )    bits = bits | IN_UP;
+    if( gamepad_down() > 0 )  bits = bits | IN_DOWN;
+    if( fire )                bits = bits | IN_FIRE;
+    if( gamepad_button_x() > 0 ) bits = bits | IN_ZAP;
+    return bits;
+}
+
+void rec_add( int bits )
+{
+    if( rec_frames >= REC_MAX_FRAMES ) return;
+    rec_data[ rec_frames / 5 ] = rec_data[ rec_frames / 5 ] | ( bits << ( ( rec_frames % 5 ) * 6 ) );
+    rec_frames++;
+}
+
+int rec_get( int* data, int position )
+{
+    return ( data[ position / 5 ] >> ( ( position % 5 ) * 6 ) ) & 63;
+}
+
+void apply_input( int bits )
+{
+    int i;
+    in_bits = bits;
+    for( i = 0; i < 6; i++ )
+    {
+        if( bits & ( 1 << i ) ) in_held[ i ]++;
+        else in_held[ i ] = 0;
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -100,17 +225,46 @@ float frand_range( float a, float b )
 #define STATE_TITLE     0
 #define STATE_PLAYING   1
 #define STATE_GAMEOVER  2
+#define STATE_DEMO      3     // attract mode: replaying a recorded game
+#define STATE_ENTRY     4     // entering initials
+#define STATE_OPTIONS   5
 
 int state = STATE_TITLE;
 int state_timer = 0;
 int frame = 0;
+int anim = 0;                 // animation clock: game-relative in play, so replays match
 bool paused = false;
 
 int score = 0;
-int high_score = 10000;
 int lives;
 int level;
 int next_extra_life;
+int save_message = 0;
+
+// difficulty of the game being played (a demo uses the one it was recorded on)
+int game_difficulty = DIFF_NORMAL;
+
+int diff_pick( int easy, int normal, int hard )
+{
+    if( game_difficulty == DIFF_EASY ) return easy;
+    if( game_difficulty == DIFF_HARD ) return hard;
+    return normal;
+}
+
+float diff_pickf( float easy, float normal, float hard )
+{
+    if( game_difficulty == DIFF_EASY ) return easy;
+    if( game_difficulty == DIFF_HARD ) return hard;
+    return normal;
+}
+
+bool options_from_pause = false;
+
+bool in_game()
+{
+    return state == STATE_PLAYING || state == STATE_DEMO
+           || ( state == STATE_OPTIONS && options_from_pause );
+}
 
 // play phases within a level
 #define PHASE_FLYIN   0           // camera flies in toward the new web
@@ -125,15 +279,252 @@ float shake = 0;
 float flash = 0;
 int flash_color = 0xFFFFFFFF;
 
-void add_shake( float amount ) { if( amount > shake ) shake = amount; }
+void add_shake( float amount )
+{
+    if( opt_shake && amount > shake ) shake = amount;
+}
 
 void add_flash( float amount, int color )
 {
+    if( !opt_flash ) return;
     if( amount > flash )
     {
         flash = amount;
         flash_color = color;
     }
+}
+
+// -----------------------------------------------------------------------------
+//   HIGH SCORE TABLE
+// -----------------------------------------------------------------------------
+
+#define HS_COUNT 5
+
+int[ HS_COUNT ] hs_score;
+int[ HS_COUNT ] hs_name;              // 3 characters, 8 bits each; difficulty in the top byte
+
+int pack_name( int* text )
+{
+    return text[ 0 ] | ( text[ 1 ] << 8 ) | ( text[ 2 ] << 16 );
+}
+
+void unpack_name( int name, int* text )
+{
+    text[ 0 ] = name & 255;
+    text[ 1 ] = ( name >> 8 ) & 255;
+    text[ 2 ] = ( name >> 16 ) & 255;
+    text[ 3 ] = 0;
+}
+
+void init_table()
+{
+    hs_score[ 0 ] = 10000;  hs_name[ 0 ] = pack_name( "TUB" );
+    hs_score[ 1 ] = 8000;   hs_name[ 1 ] = pack_name( "WEB" );
+    hs_score[ 2 ] = 6000;   hs_name[ 2 ] = pack_name( "ZAP" );
+    hs_score[ 3 ] = 4000;   hs_name[ 3 ] = pack_name( "RIM" );
+    hs_score[ 4 ] = 2000;   hs_name[ 4 ] = pack_name( "SPK" );
+}
+
+int table_rank( int value )
+{
+    int i;
+    for( i = 0; i < HS_COUNT; i++ )
+      if( value > hs_score[ i ] ) return i;
+    return -1;
+}
+
+void table_insert( int value, int name, int rank )
+{
+    int i;
+    if( rank < 0 || rank >= HS_COUNT ) return;
+    for( i = HS_COUNT - 1; i > rank; i-- )
+    {
+        hs_score[ i ] = hs_score[ i - 1 ];
+        hs_name[ i ] = hs_name[ i - 1 ];
+    }
+    hs_score[ rank ] = value;
+    hs_name[ rank ] = name;
+}
+
+void table_merge( int value, int name )
+{
+    int i;
+    for( i = 0; i < HS_COUNT; i++ )
+      if( hs_score[ i ] == value && hs_name[ i ] == name ) return;
+    table_insert( value, name, table_rank( value ) );
+}
+
+// -----------------------------------------------------------------------------
+//   MEMORY CARD
+// -----------------------------------------------------------------------------
+//   Same layout as Rockfield, under Gyre's own signature (word offsets):
+//     0-19 signature   20 format version (1)   21-25 scores   26-30 names
+//     31-33 demo seed, length, score   34 checksum of 21-33
+//     35 checksum of the demo   36 options   37 checksum of 36 and 38
+//     38 demo difficulty   40- demo recording (REC_WORDS words)
+//   A card belonging to another game is never written to.
+
+#define CARD_NONE      0
+#define CARD_OURS      1
+#define CARD_EMPTY     2
+#define CARD_OTHER     3
+
+#define SAVE_OFFSET     20
+#define SAVE_HEADER     16
+#define SAVE_EXTRA_AT   36
+#define SAVE_DEMO_AT    40
+#define SAVE_VERSION    1
+#define SAVE_KEY        0x2F6A9B3D
+
+#define SAVE_MSG_NONE      0
+#define SAVE_MSG_SAVED     1
+#define SAVE_MSG_NO_CARD   2
+#define SAVE_MSG_OTHER     3
+
+int* save_signature_text = "GYRE TUBE SHOOTER V1";   // exactly 20 characters
+int card_state = CARD_NONE;
+bool card_loaded = false;
+int[ SAVE_HEADER ] save_header;
+int[ 3 ] save_extra;
+int[ REC_WORDS ] card_demo;
+
+int checksum( int* data, int count )
+{
+    int h = SAVE_KEY, i;
+    for( i = 0; i < count; i++ )
+      h = ( ( h << 5 ) | ( ( h >> 27 ) & 31 ) ) ^ data[ i ];
+    return h;
+}
+
+int pack_options()
+{
+    int f = 0, h = 0;
+    if( opt_shake ) f = 1;
+    if( opt_flash ) h = 1;
+    return opt_music | ( opt_sfx << 4 ) | ( opt_difficulty << 8 ) | ( f << 10 ) | ( h << 11 ) | ( 1 << 12 );
+}
+
+void unpack_options( int word )
+{
+    opt_music = min( word & 15, 10 );
+    opt_sfx = min( ( word >> 4 ) & 15, 10 );
+    opt_difficulty = ( word >> 8 ) & 3;
+    if( opt_difficulty > DIFF_HARD ) opt_difficulty = DIFF_NORMAL;
+    opt_shake = ( ( word >> 10 ) & 1 ) != 0;
+    opt_flash = ( ( word >> 11 ) & 1 ) != 0;
+}
+
+int extra_checksum()
+{
+    int[ 2 ] w;
+    w[ 0 ] = save_extra[ 0 ];
+    w[ 1 ] = save_extra[ 2 ];
+    return checksum( w, 2 );
+}
+
+void load_save()
+{
+    int i;
+    bool extra_ok;
+
+    card_read_data( save_header, SAVE_OFFSET, SAVE_HEADER );
+    if( save_header[ 0 ] != SAVE_VERSION ) return;
+    if( save_header[ 14 ] != checksum( &save_header[ 1 ], 13 ) ) return;
+
+    card_read_data( save_extra, SAVE_EXTRA_AT, 3 );
+    extra_ok = ( save_extra[ 1 ] == extra_checksum() && ( save_extra[ 0 ] & ( 1 << 12 ) ) );
+    if( extra_ok )
+    {
+        unpack_options( save_extra[ 0 ] );
+        apply_music_volume();
+    }
+
+    for( i = 0; i < HS_COUNT; i++ )
+      table_merge( save_header[ 1 + i ], save_header[ 6 + i ] );
+
+    if( save_header[ 13 ] > demo_score && save_header[ 12 ] > 0 && save_header[ 12 ] <= REC_MAX_FRAMES )
+    {
+        card_read_data( card_demo, SAVE_DEMO_AT, REC_WORDS );
+        if( save_header[ 15 ] == checksum( card_demo, REC_WORDS ) )
+        {
+            memcpy( demo_data, card_demo, REC_WORDS );
+            demo_seed = save_header[ 11 ];
+            demo_frames = save_header[ 12 ];
+            demo_score = save_header[ 13 ];
+            demo_difficulty = DIFF_NORMAL;
+            if( extra_ok ) demo_difficulty = save_extra[ 2 ] & 3;
+        }
+    }
+}
+
+int high_score;
+
+void refresh_card()
+{
+    if( !card_is_connected() )
+    {
+        card_state = CARD_NONE;
+        card_loaded = false;
+        return;
+    }
+
+    if( card_signature_matches( (game_signature*)save_signature_text ) ) card_state = CARD_OURS;
+    else if( card_is_empty() ) card_state = CARD_EMPTY;
+    else card_state = CARD_OTHER;
+
+    if( card_state == CARD_OURS && !card_loaded )
+    {
+        load_save();
+        high_score = hs_score[ 0 ];
+    }
+    card_loaded = ( card_state != CARD_NONE );
+}
+
+int save_all()
+{
+    int i;
+    refresh_card();
+
+    if( card_state == CARD_NONE ) return SAVE_MSG_NO_CARD;
+    if( card_state == CARD_OTHER ) return SAVE_MSG_OTHER;
+    if( card_state == CARD_EMPTY ) card_write_signature( (game_signature*)save_signature_text );
+
+    save_header[ 0 ] = SAVE_VERSION;
+    for( i = 0; i < HS_COUNT; i++ )
+    {
+        save_header[ 1 + i ] = hs_score[ i ];
+        save_header[ 6 + i ] = hs_name[ i ];
+    }
+    save_header[ 11 ] = demo_seed;
+    save_header[ 12 ] = demo_frames;
+    save_header[ 13 ] = demo_score;
+    save_header[ 14 ] = checksum( &save_header[ 1 ], 13 );
+    save_header[ 15 ] = checksum( demo_data, REC_WORDS );
+
+    card_write_data( demo_data, SAVE_DEMO_AT, REC_WORDS );
+    card_write_data( save_header, SAVE_OFFSET, SAVE_HEADER );
+
+    save_extra[ 0 ] = pack_options();
+    save_extra[ 2 ] = demo_difficulty;
+    save_extra[ 1 ] = extra_checksum();
+    card_write_data( save_extra, SAVE_EXTRA_AT, 3 );
+
+    card_state = CARD_OURS;
+    return SAVE_MSG_SAVED;
+}
+
+#include "demo_builtin.h"
+
+void load_builtin_demo()
+{
+    demo_frames = 0;
+    demo_score = 0;
+    if( builtin_demo_frames <= 0 ) return;
+    memcpy( demo_data, builtin_demo_data, REC_WORDS );
+    demo_seed = builtin_demo_seed;
+    demo_frames = builtin_demo_frames;
+    demo_score = builtin_demo_score;
+    demo_difficulty = DIFF_NORMAL;
 }
 
 // -----------------------------------------------------------------------------
@@ -369,7 +760,7 @@ void fire_shot()
           shot_active[ i ] = true;
           shot_lane[ i ] = claw_lane;
           shot_z[ i ] = claw_z;
-          sfx_pitched( SND_FIRE, 0.28, frand_range( 0.95, 1.05 ) );
+          sfx_pitched( SND_FIRE, 0.28, fx_range( 0.95, 1.05 ) );
           return;
       }
 }
@@ -426,15 +817,15 @@ void burst( float x, float y, int count, float speed, float length, int color )
     {
         i = next_part;
         next_part = ( next_part + 1 ) % MAX_PARTS;
-        a = frand() * 6.2831853;
-        v = speed * frand_range( 0.3, 1.0 );
+        a = fx_range( 0, 6.2831853 );
+        v = speed * fx_range( 0.3, 1.0 );
         part_x[ i ] = x;
         part_y[ i ] = y;
         part_vx[ i ] = cos( a ) * v;
         part_vy[ i ] = sin( a ) * v;
-        part_angle[ i ] = frand() * 6.2831853;
+        part_angle[ i ] = fx_range( 0, 6.2831853 );
         part_len[ i ] = length;
-        part_life[ i ] = 25 + grand() % 25;
+        part_life[ i ] = fx_range( 25, 50 );
         part_max[ i ] = part_life[ i ];
         part_color[ i ] = color;
     }
@@ -488,7 +879,7 @@ int count_enemies()
 
 float base_speed()
 {
-    return 0.010 + level * 0.0012;
+    return ( 0.010 + level * 0.0012 ) * diff_pickf( 0.8, 1.0, 1.2 );
 }
 
 int spawn_enemy( int type, int lane, float z )
@@ -559,7 +950,7 @@ void kill_enemy( int i, bool split )
     else add_score( 100 );
 
     burst_at( en_lane[ i ], en_z[ i ], 14, 2.5, 0xFFFFFFFF );
-    if( !quiet_kills ) sfx_pitched( SND_ENEMY_DIE, 0.45, frand_range( 0.9, 1.1 ) );
+    if( !quiet_kills ) sfx_pitched( SND_ENEMY_DIE, 0.45, fx_range( 0.9, 1.1 ) );
     en_active[ i ] = false;
 }
 
@@ -672,20 +1063,407 @@ void start_level()
     sfx( SND_LEVEL_START, 0.6 );
 }
 
-void new_game()
+// resets every piece of gameplay state, then seeds the gameplay RNG:
+// a live game and its replay must start out bit-for-bit identical
+void begin_game( int seed, bool demo )
 {
+    int i;
+
+    game_difficulty = opt_difficulty;
+    if( demo ) game_difficulty = demo_difficulty;
+
+    game_seed = seed;
+    rng_state = seed;
+    fx_state = seed ^ 0x2545F491;
+    if( fx_state == 0 ) fx_state = 1;
+
+    demo_mode = demo;
+    sfx_muted = demo;
+    demo_pos = 0;
+    game_frame = 0;
+    rec_frames = 0;
+    for( i = 0; i < REC_WORDS; i++ ) rec_data[ i ] = 0;
+    in_bits = 0;
+    for( i = 0; i < 6; i++ ) in_held[ i ] = 0;
+    input_lock = false;
+
     score = 0;
-    lives = 3;
+    lives = diff_pick( 5, 3, 2 );
     level = 1;
     next_extra_life = 20000;
     paused = false;
     fire_cooldown = 0;
     move_timer = 0;
-    rng_state = rand() % 2000000000 + 1;
+    zap_flash_timer = 0;
+    quiet_kills = false;
+    shake = 0;
+    flash = 0;
+    web_spin = 0;
+    save_message = SAVE_MSG_NONE;
+    high_score = hs_score[ 0 ];
+    for( i = 0; i < MAX_PARTS; i++ ) part_life[ i ] = 0;
+    next_part = 0;
+
+    stop_sfx_channels();
     start_level();
-    state = STATE_PLAYING;
     state_timer = 0;
-    music_play( MUSIC_GAME, 0.5 );
+
+    if( demo )
+    {
+        state = STATE_DEMO;
+        play_track( MUSIC_GAME, 0.3 );
+    }
+    else
+    {
+        state = STATE_PLAYING;
+        play_track( MUSIC_GAME, 0.5 );
+    }
+}
+
+void new_game()
+{
+    // the hardware RNG (seeded from the clock) picks the game's seed
+    begin_game( rand() % 2000000000 + 1, false );
+}
+
+// -----------------------------------------------------------------------------
+//   TITLE PAGES, GAME END, INITIALS ENTRY
+// -----------------------------------------------------------------------------
+
+#define PAGE_LOGO    0
+#define PAGE_SCORES  1
+int title_page = PAGE_LOGO;
+int highlight_rank = -1;
+
+void enter_title_page( int page )
+{
+    int i;
+    level = 1;
+    build_web( 0 );
+    set_level_colors();
+    clear_spikes();
+    for( i = 0; i < MAX_ENEMIES; i++ ) en_active[ i ] = false;
+    cam_z = -1.6;
+    demo_mode = false;
+    sfx_muted = false;
+    paused = false;
+    shake = 0;
+    flash = 0;
+    zap_flash_timer = 0;
+    stop_sfx_channels();
+    title_page = page;
+    state = STATE_TITLE;
+    state_timer = 0;
+    play_track( MUSIC_GAME, 0.3 );
+}
+
+void enter_title()
+{
+    highlight_rank = -1;
+    enter_title_page( PAGE_LOGO );
+}
+
+int* entry_charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- ";
+#define ENTRY_CHARS 38
+int[ 3 ] entry_index;
+int entry_cursor;
+int entry_rank;
+
+bool pressed_or_repeat( int held_frames )
+{
+    return held_frames == 1 || ( held_frames > 18 && held_frames % 5 == 0 );
+}
+
+// a live game ended: keep its recording if it is the best so far,
+// then ask for initials or show the game over screen
+void finish_game()
+{
+    bool demo_changed = false;
+
+    if( score > demo_score && rec_frames >= DEMO_MIN_FRAMES )
+    {
+        memcpy( demo_data, rec_data, REC_WORDS );
+        demo_seed = game_seed;
+        demo_frames = rec_frames;
+        demo_score = score;
+        demo_difficulty = game_difficulty;
+        demo_changed = true;
+    }
+
+    play_track( MUSIC_GAME, 0.3 );
+
+    if( table_rank( score ) >= 0 )
+    {
+        entry_index[ 0 ] = 0;
+        entry_index[ 1 ] = 0;
+        entry_index[ 2 ] = 0;
+        entry_cursor = 0;
+        entry_rank = table_rank( score );
+        sfx( SND_EXTRA_LIFE, 0.6 );
+        state = STATE_ENTRY;
+        state_timer = 0;
+        return;
+    }
+
+    save_message = SAVE_MSG_NONE;
+    if( demo_changed ) save_message = save_all();
+    state = STATE_GAMEOVER;
+    state_timer = 0;
+}
+
+void finish_entry()
+{
+    int[ 4 ] name;
+    name[ 0 ] = entry_charset[ entry_index[ 0 ] ];
+    name[ 1 ] = entry_charset[ entry_index[ 1 ] ];
+    name[ 2 ] = entry_charset[ entry_index[ 2 ] ];
+    name[ 3 ] = 0;
+
+    table_insert( score, pack_name( name ) | ( game_difficulty << 24 ), entry_rank );
+    high_score = hs_score[ 0 ];
+    save_message = save_all();
+    sfx( SND_LEVEL_START, 0.6 );
+    highlight_rank = entry_rank;
+    enter_title_page( PAGE_SCORES );
+}
+
+void update_entry()
+{
+    int i = entry_cursor;
+
+    if( pressed_or_repeat( gamepad_up() ) )
+    {
+        entry_index[ i ] = ( entry_index[ i ] + 1 ) % ENTRY_CHARS;
+        sfx( SND_MOVE, 0.4 );
+    }
+    if( pressed_or_repeat( gamepad_down() ) )
+    {
+        entry_index[ i ] = ( entry_index[ i ] + ENTRY_CHARS - 1 ) % ENTRY_CHARS;
+        sfx( SND_MOVE, 0.4 );
+    }
+    if( gamepad_left() == 1 && entry_cursor > 0 ) entry_cursor--;
+    if( gamepad_right() == 1 && entry_cursor < 2 ) entry_cursor++;
+
+    if( gamepad_button_b() == 1 || gamepad_button_a() == 1 )
+    {
+        if( entry_cursor < 2 )
+        {
+            entry_cursor++;
+            sfx( SND_SPIKE_HIT, 0.5 );
+        }
+        else
+        {
+            finish_entry();
+            return;
+        }
+    }
+
+    if( gamepad_button_start() == 1 || state_timer > 1800 ) finish_entry();
+}
+
+// -----------------------------------------------------------------------------
+//   OPTIONS SCREEN
+// -----------------------------------------------------------------------------
+
+#define OPT_MUSIC    0
+#define OPT_SFX      1
+#define OPT_DIFF     2
+#define OPT_SHAKE    3
+#define OPT_FLASH    4
+#define OPT_RESET    5
+#define OPT_BACK     6
+#define OPT_ROWS     7
+
+int opt_cursor = 0;
+bool opt_confirm_reset = false;
+int opt_note_timer = 0;
+
+void enter_options()
+{
+    opt_cursor = 0;
+    opt_confirm_reset = false;
+    opt_note_timer = 0;
+    state = STATE_OPTIONS;
+    state_timer = 0;
+}
+
+void leave_options()
+{
+    refresh_card();
+    if( card_state == CARD_OURS || card_state == CARD_EMPTY ) save_all();
+
+    if( options_from_pause )
+    {
+        options_from_pause = false;
+        state = STATE_PLAYING;
+        state_timer = 0;
+        return;
+    }
+    enter_title();
+}
+
+void reset_high_scores()
+{
+    init_table();
+    load_builtin_demo();
+    high_score = hs_score[ 0 ];
+    refresh_card();
+    if( card_state == CARD_OURS || card_state == CARD_EMPTY ) save_all();
+    opt_note_timer = 150;
+    sfx( SND_LEVEL_START, 0.6 );
+}
+
+void update_options()
+{
+    int change = 0;
+
+    if( opt_note_timer > 0 ) opt_note_timer--;
+
+    if( pressed_or_repeat( gamepad_up() ) )
+    {
+        opt_cursor = ( opt_cursor + OPT_ROWS - 1 ) % OPT_ROWS;
+        opt_confirm_reset = false;
+        sfx( SND_MOVE, 0.4 );
+    }
+    if( pressed_or_repeat( gamepad_down() ) )
+    {
+        opt_cursor = ( opt_cursor + 1 ) % OPT_ROWS;
+        opt_confirm_reset = false;
+        sfx( SND_MOVE, 0.4 );
+    }
+
+    if( pressed_or_repeat( gamepad_left() ) ) change = -1;
+    if( pressed_or_repeat( gamepad_right() ) ) change = 1;
+
+    if( change != 0 )
+    {
+        if( opt_cursor == OPT_MUSIC )
+        {
+            opt_music = max( 0, min( 10, opt_music + change ) );
+            apply_music_volume();
+        }
+        else if( opt_cursor == OPT_SFX )
+        {
+            opt_sfx = max( 0, min( 10, opt_sfx + change ) );
+            sfx( SND_ENEMY_DIE, 0.5 );            // hear the new level
+        }
+        else if( opt_cursor == OPT_DIFF )
+        {
+            // shown in the order easy, normal, hard
+            if( opt_difficulty == DIFF_EASY && change > 0 ) opt_difficulty = DIFF_NORMAL;
+            else if( opt_difficulty == DIFF_NORMAL && change > 0 ) opt_difficulty = DIFF_HARD;
+            else if( opt_difficulty == DIFF_HARD && change < 0 ) opt_difficulty = DIFF_NORMAL;
+            else if( opt_difficulty == DIFF_NORMAL && change < 0 ) opt_difficulty = DIFF_EASY;
+            sfx( SND_SPIKE_HIT, 0.5 );
+        }
+        else if( opt_cursor == OPT_SHAKE )
+        {
+            opt_shake = !opt_shake;
+            sfx( SND_SPIKE_HIT, 0.5 );
+            add_shake( 6 );
+        }
+        else if( opt_cursor == OPT_FLASH )
+        {
+            opt_flash = !opt_flash;
+            sfx( SND_SPIKE_HIT, 0.5 );
+            add_flash( 0.3, 0xFFFFE0C0 );
+        }
+    }
+
+    if( gamepad_button_b() == 1 || gamepad_button_a() == 1 )
+    {
+        if( opt_cursor == OPT_RESET )
+        {
+            if( !opt_confirm_reset )
+            {
+                opt_confirm_reset = true;
+                sfx( SND_GRAB, 0.4 );
+            }
+            else
+            {
+                opt_confirm_reset = false;
+                reset_high_scores();
+            }
+        }
+        else if( opt_cursor == OPT_BACK )
+        {
+            leave_options();
+            return;
+        }
+    }
+
+    if( gamepad_button_start() == 1 || gamepad_button_y() == 1 ) leave_options();
+}
+
+// -----------------------------------------------------------------------------
+//   PAUSE MENU
+// -----------------------------------------------------------------------------
+
+#define PAUSE_RESUME   0
+#define PAUSE_OPTIONS  1
+#define PAUSE_QUIT     2
+
+int pause_cursor = 0;
+bool pause_confirm_quit = false;
+
+void pause_game()
+{
+    paused = true;
+    pause_cursor = PAUSE_RESUME;
+    pause_confirm_quit = false;
+    pause_all_channels();
+    sfx( SND_SPIKE_HIT, 0.5 );
+}
+
+void resume_game()
+{
+    paused = false;
+    resume_all_channels();
+    sfx( SND_SPIKE_HIT, 0.5 );
+    input_lock = true;
+}
+
+void update_pause_menu()
+{
+    if( pressed_or_repeat( gamepad_up() ) )
+    {
+        pause_cursor = ( pause_cursor + 2 ) % 3;
+        pause_confirm_quit = false;
+        sfx( SND_MOVE, 0.4 );
+    }
+    if( pressed_or_repeat( gamepad_down() ) )
+    {
+        pause_cursor = ( pause_cursor + 1 ) % 3;
+        pause_confirm_quit = false;
+        sfx( SND_MOVE, 0.4 );
+    }
+
+    if( gamepad_button_start() == 1 )
+    {
+        resume_game();
+        return;
+    }
+
+    if( gamepad_button_b() == 1 || gamepad_button_a() == 1 )
+    {
+        if( pause_cursor == PAUSE_RESUME ) resume_game();
+        else if( pause_cursor == PAUSE_OPTIONS )
+        {
+            options_from_pause = true;
+            enter_options();
+        }
+        else if( !pause_confirm_quit )
+        {
+            pause_confirm_quit = true;
+            sfx( SND_GRAB, 0.4 );
+        }
+        else
+        {
+            // abandon the game: not scored, never becomes the demo
+            paused = false;
+            enter_title();
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -700,12 +1478,12 @@ void update_claw()
     int held;
 
     // direction pressed (d-pad), with key repeat
-    if( gamepad_left() > 0 ) dx = -1;
-    if( gamepad_right() > 0 ) dx = 1;
-    if( gamepad_up() > 0 ) dy = -1;
-    if( gamepad_down() > 0 ) dy = 1;
+    if( in_bits & IN_LEFT ) dx = -1;
+    if( in_bits & IN_RIGHT ) dx = 1;
+    if( in_bits & IN_UP ) dy = -1;
+    if( in_bits & IN_DOWN ) dy = 1;
 
-    held = max( max( gamepad_left(), gamepad_right() ), max( gamepad_up(), gamepad_down() ) );
+    held = max( max( in_held[ 0 ], in_held[ 1 ] ), max( in_held[ 2 ], in_held[ 3 ] ) );
     if( dx != 0 || dy != 0 )
     {
         if( held == 1 || ( held > 10 && held % 4 == 0 ) ) move_claw( dx, dy );
@@ -716,14 +1494,14 @@ void update_claw()
 
     // fire
     if( fire_cooldown > 0 ) fire_cooldown--;
-    if( ( gamepad_button_b() > 0 || gamepad_button_a() > 0 ) && fire_cooldown == 0 )
+    if( ( in_bits & IN_FIRE ) && fire_cooldown == 0 )
     {
         fire_shot();
         fire_cooldown = 6;
     }
 
     // superzapper
-    if( gamepad_button_x() == 1 && zapper_uses < 2 && phase == PHASE_FIGHT ) use_zapper();
+    if( in_held[ 5 ] == 1 && zapper_uses < 2 && phase == PHASE_FIGHT ) use_zapper();
 }
 
 void update_shots()
@@ -777,7 +1555,7 @@ void update_shots()
     for( e = 0; e < MAX_ESHOTS; e++ )
       if( eshot_active[ e ] )
       {
-          eshot_z[ e ] -= 0.035 + level * 0.002;
+          eshot_z[ e ] -= ( 0.035 + level * 0.002 ) * diff_pickf( 0.85, 1.0, 1.15 );
           if( eshot_z[ e ] <= 0.05 )
           {
               eshot_active[ e ] = false;
@@ -797,7 +1575,7 @@ void update_enemies()
         if( spawn_timer <= 0 && count_enemies() < 8 )
         {
             if( spawn_enemy( pick_enemy_type(), grand() % lanes, DEPTH ) >= 0 ) spawned++;
-            spawn_timer = max( 75 - level * 4, 25 ) + grand() % 30;
+            spawn_timer = ( max( 75 - level * 4, 25 ) + grand() % 30 ) * diff_pickf( 1.3, 1.0, 0.8 );
         }
     }
 
@@ -835,7 +1613,7 @@ void update_enemies()
                     start_flip( i, 1 - 2 * ( grand() % 2 ) );
                     en_timer[ i ] = 70 + grand() % 110;
                 }
-                if( en_z[ i ] > 1.2 && grand() % 1000 < 4 + level ) enemy_fire( en_lane[ i ], en_z[ i ] );
+                if( en_z[ i ] > 1.2 && grand() % 1000 < diff_pick( 2, 4, 6 ) + level ) enemy_fire( en_lane[ i ], en_z[ i ] );
             }
 
             if( en_z[ i ] <= 0 )
@@ -866,7 +1644,7 @@ void update_enemies()
                     if( d > 0 ) start_flip( i, 1 );
                     else start_flip( i, -1 );
                 }
-                en_timer[ i ] = max( 26 - level, 12 );
+                en_timer[ i ] = max( 26 - level, 12 ) + diff_pick( 8, 0, -4 );
             }
         }
 
@@ -930,15 +1708,38 @@ void update_particles()
 
 void update_playing()
 {
-    int i;
+    int i, bits;
 
-    if( gamepad_button_start() == 1 )
+    if( !demo_mode )
     {
-        paused = !paused;
-        if( paused ) pause_all_channels();
-        else resume_all_channels();
+        if( paused )
+        {
+            update_pause_menu();
+            if( paused || state != STATE_PLAYING ) return;
+        }
+        else if( gamepad_button_start() == 1 )
+        {
+            pause_game();
+            return;
+        }
     }
-    if( paused ) return;
+
+    // logic projects explosions through the camera: aim it first
+    set_camera();
+
+    // this logic frame's input: replayed, or read live and recorded
+    if( demo_mode )
+    {
+        bits = rec_get( demo_data, demo_pos );
+        demo_pos++;
+    }
+    else
+    {
+        bits = read_gamepad_bits();
+        rec_add( bits );
+    }
+    apply_input( bits );
+    game_frame++;
 
     phase_timer++;
     if( zap_flash_timer > 0 ) zap_flash_timer--;
@@ -998,9 +1799,8 @@ void update_playing()
         {
             if( lives <= 0 )
             {
-                state = STATE_GAMEOVER;
-                state_timer = 0;
-                music_stop();
+                if( demo_mode ) enter_title();
+                else finish_game();
                 return;
             }
 
@@ -1031,7 +1831,7 @@ void draw_stars()
     vec_thickness( 1 );
     for( i = 0; i < STARS; i++ )
     {
-        b = 0.5 + 0.5 * sin( frame * 0.04 + star_p[ i ] );
+        b = 0.5 + 0.5 * sin( anim * 0.04 + star_p[ i ] );
         g = 40 + 50 * b;
         vec_color( 0xFF000000 | ( ( g + 30 ) << 16 ) | ( g << 8 ) | g, 0 );
         vec_line_polar( star_x[ i ], star_y[ i ], 1, 0 );
@@ -1074,7 +1874,7 @@ void draw_web()
       vec_line_3d( wx( i ), wy( i ), 0, wx( i ), wy( i ), DEPTH );          // lane edges
 
     // the claw's lane glows brighter
-    if( state == STATE_PLAYING && phase != PHASE_DEAD )
+    if( in_game() && state != STATE_GAMEOVER && phase != PHASE_DEAD )
     {
         vec_thickness( 2.5 );
         vec_color( 0xFFFFFFFF, web_glow );
@@ -1125,7 +1925,7 @@ void draw_claw()
         x1 = lx( lane, -1, 0, 0.98 );  y1 = ly( lane, -1, 0, 0.98 );
     }
     cx = ( x0 + x1 ) * 0.5;        cy = ( y0 + y1 ) * 0.5;
-    pulse = 0.02 * sin( frame * 0.3 );
+    pulse = 0.02 * sin( anim * 0.3 );
 
     vec_thickness( 2.5 );
     vec_glow_size( 20 );
@@ -1194,7 +1994,7 @@ void draw_enemies()
                 vec_thickness( 2 );
                 vec_glow_size( 12 );
                 vec_color( 0xFF60FF60, 0xFF186018 );
-                ang = frame * 0.25 + i;
+                ang = anim * 0.25 + i;
                 qx = px;
                 qy = py;
                 for( r = 0.15; r <= 1.0; r += 0.12 )
@@ -1244,8 +2044,8 @@ void draw_spikes_and_shots()
     for( i = 0; i < MAX_ESHOTS; i++ )
       if( eshot_active[ i ] && vec_project( lane_cx[ eshot_lane[ i ] ], lane_cy[ eshot_lane[ i ] ], eshot_z[ i ], &px, &py ) )
       {
-          vec_line( px + cos( frame * 0.3 ) * 4, py + sin( frame * 0.3 ) * 4, px - cos( frame * 0.3 ) * 4, py - sin( frame * 0.3 ) * 4 );
-          vec_line( px + sin( frame * 0.3 ) * 4, py - cos( frame * 0.3 ) * 4, px - sin( frame * 0.3 ) * 4, py + cos( frame * 0.3 ) * 4 );
+          vec_line( px + cos( anim * 0.3 ) * 4, py + sin( anim * 0.3 ) * 4, px - cos( anim * 0.3 ) * 4, py - sin( anim * 0.3 ) * 4 );
+          vec_line( px + sin( anim * 0.3 ) * 4, py - cos( anim * 0.3 ) * 4, px - sin( anim * 0.3 ) * 4, py + cos( anim * 0.3 ) * 4 );
       }
 }
 
@@ -1275,6 +2075,44 @@ float number_width( int value, float size )
         digits++;
     }
     return ( digits * 1.6 - 0.6 ) * size;
+}
+
+#define DIM_TEXT    0xFFC09696
+#define TEXT_CORE   0xFFFFFFFF
+#define TEXT_GLOW   0xFF705050
+
+void draw_pause_menu()
+{
+    int i;
+    float y, x;
+    int* label;
+
+    for( i = 0; i <= PAUSE_QUIT; i++ )
+    {
+        y = 170 + i * 30;
+        label = "RESUME";
+        if( i == PAUSE_OPTIONS ) label = "OPTIONS";
+        if( i == PAUSE_QUIT ) label = "QUIT TO TITLE";
+        if( i == PAUSE_QUIT && pause_confirm_quit ) label = "PRESS B AGAIN TO QUIT";
+
+        vec_thickness( 2 );
+        vec_glow_size( 14 );
+        if( i == pause_cursor )
+        {
+            if( i == PAUSE_QUIT && pause_confirm_quit ) vec_color( 0xFF8080FF, 0xFF202070 );
+            else vec_color( 0xFFFFFF60, 0xFF606020 );
+            x = 320 - vec_text_width( label, 7 ) / 2 - 20 + 3 * sin( frame * 0.2 );
+            vec_line( x, y + 1, x + 9, y + 7 );
+            vec_line( x, y + 13, x + 9, y + 7 );
+        }
+        else vec_color( DIM_TEXT, 0 );
+
+        vec_text_centered( label, 320, y, 7 );
+    }
+
+    vec_thickness( 1.2 );
+    vec_color( DIM_TEXT, 0 );
+    vec_text_centered( "UP DOWN SELECT   B CHOOSE   START RESUME", 320, 280, 4.2 );
 }
 
 void draw_hud()
@@ -1331,13 +2169,35 @@ void draw_hud()
         vec_text_centered( "AVOID THE SPIKES", 320, 290, 7 );
     }
 
-    if( paused )
+    if( paused && state == STATE_PLAYING )
     {
         vec_thickness( 3 );
         vec_glow_size( 20 );
         vec_color( 0xFFFFFFFF, 0xFF705050 );
-        vec_text_centered( "PAUSED", 320, 150, 16 );
+        vec_text_centered( "PAUSED", 320, 110, 14 );
+        draw_pause_menu();
     }
+}
+
+void draw_card_status()
+{
+    vec_thickness( 1.2 );
+    vec_glow_size( 8 );
+    vec_color( 0xFF907070, 0 );
+    if( card_state == CARD_OURS )       vec_text_centered( "HIGH SCORES SAVED ON MEMORY CARD", 320, 342, 4.2 );
+    else if( card_state == CARD_EMPTY ) vec_text_centered( "MEMORY CARD READY", 320, 342, 4.2 );
+    else if( card_state == CARD_OTHER ) vec_text_centered( "MEMORY CARD HAS ANOTHER GAME - NOT SAVING", 320, 342, 4.2 );
+    else                                vec_text_centered( "NO MEMORY CARD - HIGH SCORES WILL NOT BE SAVED", 320, 342, 4.2 );
+}
+
+void draw_save_message( float y )
+{
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
+    vec_color( 0xFFC0A0A0, 0 );
+    if( save_message == SAVE_MSG_SAVED )        vec_text_centered( "SAVED TO MEMORY CARD", 320, y, 5 );
+    else if( save_message == SAVE_MSG_NO_CARD ) vec_text_centered( "NO MEMORY CARD - NOT SAVED", 320, y, 5 );
+    else                                        vec_text_centered( "CARD HAS ANOTHER GAME - NOT SAVED", 320, y, 5 );
 }
 
 void draw_title()
@@ -1374,13 +2234,18 @@ void draw_title()
 
     vec_thickness( 1.5 );
     vec_glow_size( 10 );
+    vec_color( 0xFFFFB090, 0xFF603020 );
+    vec_text_centered( "Y  OPTIONS", 320, 226, 6 );
+
     vec_color( 0xFFC09696, 0 );
     vec_text_centered( "D-PAD MOVE   B FIRE   X SUPERZAPPER", 320, 262, 5 );
-    vec_text_centered( "SHOOT THEM BEFORE THEY REACH THE RIM", 320, 284, 5 );
+    vec_text_centered( "START PAUSE", 320, 284, 5 );
 
     vec_color( 0xFFFFE0A0, 0xFF403010 );
-    vec_text_centered( "HIGH SCORE", 300, 320, 6 );
-    vec_number( high_score, 320 + vec_text_width( "HIGH SCORE", 6 ) / 2 - 4, 320, 6 );
+    vec_text( "HIGH SCORE", 230, 314, 6 );
+    vec_number( high_score, 230 + vec_text_width( "HIGH SCORE ", 6 ), 314, 6 );
+
+    draw_card_status();
 
     vec_thickness( 1 );
     vec_color( 0xFF806868, 0 );
@@ -1389,46 +2254,323 @@ void draw_title()
 
 void draw_game_over()
 {
+    float t = fmin( 1.0, state_timer / 30.0 );
+
+    vec_intensity( t );
     vec_thickness( 3 );
     vec_glow_size( 22 );
     vec_color( 0xFF8080FF, 0xFF202070 );
-    vec_text_centered( "GAME OVER", 320, 130, 18 );
+    vec_text_centered( "GAME OVER", 320, 120 - 20 * ( 1 - t ), 18 );
+
+    if( save_message != SAVE_MSG_NONE ) draw_save_message( 262 );
+
     if( state_timer > 90 && ( frame / 30 ) % 2 == 0 )
     {
         vec_thickness( 2 );
         vec_glow_size( 14 );
-        vec_color( 0xFFFFFFFF, 0xFF705050 );
+        vec_color( TEXT_CORE, TEXT_GLOW );
         vec_text_centered( "PRESS START", 320, 220, 8 );
     }
+    vec_intensity( 1 );
+}
+
+void draw_scores_page()
+{
+    int i, k;
+    float y, t;
+    int[ 4 ] name;
+    int[ 2 ] rank_text;
+
+    t = fmin( 1.0, state_timer / 30.0 );
+    vec_intensity( t );
+
+    vec_thickness( 3 );
+    vec_glow_size( 22 );
+    vec_color( 0xFFFFE0A0, 0xFF805020 );
+    vec_text_centered( "HIGH SCORES", 320, 34, 15 );
+
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
+    vec_color( 0xFFFFB090, 0xFF603020 );
+    vec_dashed_line( 170, 82, 470, 82, 8, 6 );
+
+    rank_text[ 1 ] = 0;
+
+    for( i = 0; i < HS_COUNT; i++ )
+    {
+        y = 104 + i * 40;
+        vec_intensity( t * fmin( 1.0, fmax( 0.0, ( state_timer - i * 8 ) / 20.0 ) ) );
+
+        if( i == highlight_rank )
+        {
+            vec_thickness( 2.5 );
+            vec_glow_size( 18 );
+            if( ( frame / 10 ) % 2 ) vec_color( 0xFF60FFFF, 0xFF208080 );
+            else vec_color( 0xFFFFFFFF, 0xFF406060 );
+        }
+        else
+        {
+            vec_thickness( 2 );
+            vec_glow_size( 14 );
+            if( i == 0 ) vec_color( 0xFFFFF0B0, 0xFF805020 );
+            else vec_color( 0xFFF0D8E8, 0xFF603848 );
+        }
+
+        rank_text[ 0 ] = '1' + i;
+        vec_text( rank_text, 180, y, 9 );
+        unpack_name( hs_name[ i ], name );
+        vec_text( name, 230, y, 9 );
+        vec_number( hs_score[ i ], 460 - number_width( hs_score[ i ], 9 ), y, 9 );
+
+        k = ( hs_name[ i ] >> 24 ) & 3;
+        if( k != DIFF_NORMAL )
+        {
+            vec_thickness( 1.5 );
+            vec_glow_size( 8 );
+            if( k == DIFF_EASY ) { vec_color( 0xFF90E090, 0 ); vec_char( 'E', 474, y + 6, 4 ); }
+            else                 { vec_color( 0xFF8080FF, 0 ); vec_char( 'H', 474, y + 6, 4 ); }
+        }
+    }
+
+    vec_intensity( t );
+
+    if( save_message != SAVE_MSG_NONE && highlight_rank >= 0 ) draw_save_message( 312 );
+    else if( ( frame / 30 ) % 2 == 0 )
+    {
+        vec_thickness( 2 );
+        vec_glow_size( 14 );
+        vec_color( TEXT_CORE, TEXT_GLOW );
+        vec_text_centered( "PRESS START", 320, 308, 8 );
+    }
+
+    draw_card_status();
+    vec_intensity( 1 );
+}
+
+void draw_entry()
+{
+    int i;
+    float x, w, t;
+    int[ 2 ] letter;
+
+    t = fmin( 1.0, state_timer / 25.0 );
+    vec_intensity( t );
+
+    vec_thickness( 3 );
+    vec_glow_size( 22 );
+    if( entry_rank == 0 )
+    {
+        vec_color( 0xFF60FFFF, 0xFF205050 );
+        vec_text_centered( "NEW HIGH SCORE", 320, 30, 14 );
+    }
+    else
+    {
+        vec_color( 0xFFFFE0A0, 0xFF805020 );
+        vec_text_centered( "TOP 5 SCORE", 320, 30, 14 );
+    }
+
+    vec_thickness( 2.5 );
+    vec_glow_size( 16 );
+    vec_color( TEXT_CORE, TEXT_GLOW );
+    w = number_width( score, 12 );
+    vec_number( score, 320 - w / 2, 84, 12 );
+
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
+    vec_color( DIM_TEXT, 0 );
+    vec_text_centered( "ENTER YOUR INITIALS", 320, 136, 6 );
+
+    letter[ 1 ] = 0;
+    for( i = 0; i < 3; i++ )
+    {
+        x = 320 - 90 + i * 70;
+        letter[ 0 ] = entry_charset[ entry_index[ i ] ];
+
+        if( i == entry_cursor )
+        {
+            vec_thickness( 3.5 );
+            vec_glow_size( 26 );
+            vec_color( 0xFF60FFFF, 0xFF208080 );
+            vec_text( letter, x, 170 + 3 * sin( frame * 0.2 ), 20 );
+            if( ( frame / 15 ) % 2 == 0 ) vec_line( x - 4, 226, x + 24, 226 );
+        }
+        else
+        {
+            vec_thickness( 3 );
+            vec_glow_size( 18 );
+            vec_color( 0xFFF0D8E8, 0xFF603848 );
+            vec_text( letter, x, 170, 20 );
+            vec_line( x - 4, 226, x + 24, 226 );
+        }
+
+        if( letter[ 0 ] == ' ' )
+        {
+            vec_thickness( 1.5 );
+            vec_dashed_line( x, 210, x + 20, 210, 3, 3 );
+        }
+    }
+
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
+    vec_color( DIM_TEXT, 0 );
+    vec_text_centered( "UP DOWN  CHANGE     LEFT RIGHT  MOVE", 320, 268, 5 );
+    vec_text_centered( "B  NEXT     START  DONE", 320, 290, 5 );
+
+    vec_intensity( 1 );
+}
+
+void draw_demo_overlay()
+{
+    vec_thickness( 2.5 );
+    vec_glow_size( 16 );
+    if( ( frame / 40 ) % 2 == 0 )
+    {
+        vec_color( 0xFFFFE0A0, 0xFF805020 );
+        vec_text_centered( "DEMO", 320, 64, 10 );
+    }
+
+    vec_thickness( 2 );
+    vec_glow_size( 14 );
+    vec_color( TEXT_CORE, TEXT_GLOW );
+    vec_text_centered( "PRESS START", 320, 322, 8 );
+}
+
+void draw_value_arrows( float x_left, float x_right, float y )
+{
+    vec_line( x_left, y + 6, x_left + 6, y );
+    vec_line( x_left, y + 6, x_left + 6, y + 12 );
+    vec_line( x_right, y + 6, x_right - 6, y );
+    vec_line( x_right, y + 6, x_right - 6, y + 12 );
+}
+
+void draw_options()
+{
+    int i, k, amount;
+    float y, t, x;
+    bool selected;
+    int* value;
+
+    t = fmin( 1.0, state_timer / 25.0 );
+    vec_intensity( t );
+
+    vec_thickness( 3 );
+    vec_glow_size( 22 );
+    vec_color( 0xFFFFE0A0, 0xFF805020 );
+    vec_text_centered( "OPTIONS", 320, 24, 15 );
+
+    for( i = 0; i < OPT_ROWS; i++ )
+    {
+        y = 86 + i * 30;
+        if( i == OPT_RESET ) y += 10;
+        if( i == OPT_BACK ) y += 14;
+        selected = ( i == opt_cursor );
+
+        vec_thickness( 1.8 );
+        vec_glow_size( 12 );
+        if( selected ) vec_color( 0xFFFFFF60, 0xFF606020 );
+        else vec_color( DIM_TEXT, 0 );
+
+        if( i == OPT_MUSIC ) vec_text( "MUSIC VOLUME", 110, y, 6 );
+        else if( i == OPT_SFX ) vec_text( "EFFECTS VOLUME", 110, y, 6 );
+        else if( i == OPT_DIFF ) vec_text( "DIFFICULTY", 110, y, 6 );
+        else if( i == OPT_SHAKE ) vec_text( "SCREEN SHAKE", 110, y, 6 );
+        else if( i == OPT_FLASH ) vec_text( "SCREEN FLASHES", 110, y, 6 );
+        else if( i == OPT_RESET ) vec_text( "RESET HIGH SCORES", 110, y, 6 );
+        else vec_text( "BACK", 110, y, 6 );
+
+        if( selected )
+        {
+            x = 92 + 3 * sin( frame * 0.2 );
+            vec_line( x, y + 1, x + 8, y + 6 );
+            vec_line( x, y + 11, x + 8, y + 6 );
+        }
+
+        if( i == OPT_MUSIC || i == OPT_SFX )
+        {
+            amount = opt_music;
+            if( i == OPT_SFX ) amount = opt_sfx;
+            vec_thickness( 6 );
+            vec_glow_size( 12 );
+            for( k = 0; k < 10; k++ )
+            {
+                if( k < amount ) vec_color( 0xFFFFE060, 0xFF806020 );
+                else vec_color( 0xFF503838, 0 );
+                vec_line( 380 + k * 14, y + 6, 389 + k * 14, y + 6 );
+            }
+        }
+        else if( i == OPT_DIFF || i == OPT_SHAKE || i == OPT_FLASH )
+        {
+            if( i == OPT_DIFF )
+            {
+                value = "NORMAL";
+                if( opt_difficulty == DIFF_EASY ) value = "EASY";
+                if( opt_difficulty == DIFF_HARD ) value = "HARD";
+            }
+            else
+            {
+                value = "OFF";
+                if( i == OPT_SHAKE && opt_shake ) value = "ON";
+                if( i == OPT_FLASH && opt_flash ) value = "ON";
+            }
+
+            vec_thickness( 2 );
+            vec_glow_size( 14 );
+            if( selected ) vec_color( TEXT_CORE, TEXT_GLOW );
+            else vec_color( 0xFFE0D0D0, 0 );
+            vec_text_centered( value, 449, y, 6 );
+            if( selected ) draw_value_arrows( 384, 514, y );
+        }
+        else if( i == OPT_RESET && opt_confirm_reset && ( frame / 10 ) % 2 == 0 )
+        {
+            vec_thickness( 2 );
+            vec_glow_size( 14 );
+            vec_color( 0xFF8080FF, 0xFF202070 );
+            vec_text_centered( "PRESS B AGAIN", 449, y, 5 );
+        }
+    }
+
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
+    vec_color( 0xFFFFB090, 0 );
+    if( opt_cursor == OPT_DIFF )
+    {
+        if( options_from_pause )               vec_text_centered( "TAKES EFFECT IN THE NEXT GAME", 320, 316, 4.5 );
+        else if( opt_difficulty == DIFF_EASY ) vec_text_centered( "5 LIVES - SLOWER ENEMIES - FEWER SHOTS", 320, 316, 4.5 );
+        else if( opt_difficulty == DIFF_HARD ) vec_text_centered( "2 LIVES - FASTER ENEMIES - MORE SHOTS", 320, 316, 4.5 );
+        else                                   vec_text_centered( "3 LIVES - THE STANDARD GAME", 320, 316, 4.5 );
+    }
+    else if( opt_note_timer > 0 )
+    {
+        vec_color( 0xFF60FFFF, 0 );
+        vec_text_centered( "HIGH SCORES RESET", 320, 316, 5 );
+    }
+
+    vec_color( DIM_TEXT, 0 );
+    vec_thickness( 1.2 );
+    vec_text_centered( "UP DOWN SELECT   LEFT RIGHT CHANGE   START DONE", 320, 340, 4.2 );
+
+    vec_intensity( 1 );
 }
 
 // -----------------------------------------------------------------------------
 //   MAIN
 // -----------------------------------------------------------------------------
 
-void enter_title()
-{
-    level = 1;
-    build_web( 0 );
-    set_level_colors();
-    clear_spikes();
-    cam_z = -1.6;
-    state = STATE_TITLE;
-    state_timer = 0;
-    music_play( MUSIC_GAME, 0.3 );
-}
-
 void main()
 {
     int i;
+    bool menu_screen;
 
     srand( get_time() + 1 );
-    rng_state = 20261031;
     vec_init( 0, 0 );
     set_global_volume( 0.6 );     // headroom: the sound chip does not clamp its mix
     select_gamepad( 0 );
     music_init( SND_INSTRUMENTS, CH_MUSIC );
+    init_table();
+    load_builtin_demo();
 
+    // fixed seed: the starfield is the same on every boot
+    rng_state = 20261031;
     for( i = 0; i < STARS; i++ )
     {
         star_x[ i ] = frand() * screen_width;
@@ -1436,6 +2578,8 @@ void main()
         star_p[ i ] = frand() * 6.2831853;
     }
 
+    refresh_card();
+    high_score = hs_score[ 0 ];
     enter_title();
 
     while( true )
@@ -1443,18 +2587,47 @@ void main()
         // --- update ---
         if( state == STATE_TITLE )
         {
+            refresh_card();            // notices cards inserted on the title screen
             web_spin = frame * 0.004;
-            if( gamepad_button_start() == 1 && state_timer > 20 )
+
+            if( gamepad_button_start() == 1 && state_timer > 20 ) new_game();
+            else if( gamepad_button_y() == 1 && state_timer > 20 ) enter_options();
+
+            // logo -> high scores -> demo -> logo ...
+            else if( title_page == PAGE_LOGO && state_timer > 480 )
+              enter_title_page( PAGE_SCORES );
+            else if( title_page == PAGE_SCORES && state_timer > 360 )
             {
-                web_spin = 0;
-                new_game();
+                highlight_rank = -1;
+                if( demo_frames > 0 ) begin_game( demo_seed, true );
+                else enter_title_page( PAGE_LOGO );
             }
         }
         else if( state == STATE_PLAYING ) update_playing();
+        else if( state == STATE_DEMO )
+        {
+            if( gamepad_button_start() == 1 ) new_game();
+            else
+            {
+                update_playing();
+                if( state == STATE_DEMO && ( demo_pos >= demo_frames || demo_pos >= DEMO_MAX_PLAY ) )
+                  enter_title();
+            }
+        }
+        else if( state == STATE_ENTRY )
+        {
+            web_spin = frame * 0.004;
+            update_entry();
+        }
+        else if( state == STATE_OPTIONS )
+        {
+            if( !options_from_pause ) web_spin = frame * 0.004;
+            update_options();
+        }
         else
         {
-            if( state_timer > 90 && gamepad_button_start() == 1 ) enter_title();
-            else if( state_timer > 600 ) enter_title();
+            if( state_timer > 90 && gamepad_button_start() == 1 ) new_game();
+            else if( state_timer > 900 ) enter_title();
         }
 
         if( !paused )
@@ -1467,36 +2640,51 @@ void main()
         state_timer++;
 
         // --- draw ---
+        anim = frame;
+        if( in_game() ) anim = game_frame;
+
         clear_screen( make_color_rgb( 2, 2, 8 ) );
 
-        vec_offset( frand_range( -shake, shake ), frand_range( -shake, shake ) );
+        vec_offset( fx_range( -shake, shake ), fx_range( -shake, shake ) );
         set_camera();
+
+        menu_screen = ( state == STATE_TITLE || state == STATE_ENTRY
+                        || ( state == STATE_OPTIONS && !options_from_pause ) );
         if( paused ) vec_intensity( 0.35 );
-        if( state == STATE_TITLE ) vec_intensity( 0.55 );
+        if( menu_screen ) vec_intensity( 0.55 );
+        if( state == STATE_OPTIONS || state == STATE_ENTRY ) vec_intensity( 0.3 );
+        if( state == STATE_TITLE && title_page == PAGE_SCORES ) vec_intensity( 0.3 );
 
         draw_stars();
-        draw_web();
-        if( state == STATE_PLAYING )
+        if( state != STATE_OPTIONS ) draw_web();      // the options text needs the line budget
+        if( !menu_screen && state != STATE_OPTIONS )
         {
             draw_spikes_and_shots();
             draw_enemies();
-            draw_claw();
+            if( state != STATE_GAMEOVER ) draw_claw();
         }
         draw_particles();
         vec_intensity( 1 );
         vec_offset( 0, 0 );
 
-        if( state == STATE_TITLE ) draw_title();
+        if( state == STATE_TITLE )
+        {
+            if( title_page == PAGE_LOGO ) draw_title();
+            else draw_scores_page();
+        }
+        else if( state == STATE_ENTRY ) draw_entry();
+        else if( state == STATE_OPTIONS ) draw_options();
         else
         {
             draw_hud();
             if( state == STATE_GAMEOVER ) draw_game_over();
+            if( state == STATE_DEMO ) draw_demo_overlay();
         }
 
         vec_flush();
 
-        // superzapper: the whole screen pulses
-        if( zap_flash_timer > 0 && ( zap_flash_timer / 3 ) % 2 == 0 )
+        // superzapper: the whole screen pulses (a flash, so it follows that option)
+        if( opt_flash && zap_flash_timer > 0 && ( zap_flash_timer / 3 ) % 2 == 0 )
           vec_fill_rect( 0, 0, screen_width, screen_height, 0x30FFFFFF, blending_add );
         if( flash > 0.01 )
           vec_fill_rect( 0, 0, screen_width, screen_height, vec_scale_alpha( flash_color, flash * 0.6 ), blending_add );

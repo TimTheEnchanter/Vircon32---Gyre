@@ -205,107 +205,135 @@ def finish(rendered, _none, peak):
 # ------------------------------------------------------------- chords
 
 CHORDS = {
-    "Em": ["E3", "G3", "B3"], "F": ["F3", "A3", "C4"], "C": ["C4", "E4", "G4"],
-    "D": ["D4", "F#4", "A4"], "B": ["B3", "D#4", "F#4"], "Am": ["A3", "C4", "E4"],
+    "Am": ["A3", "C4", "E4"], "F": ["F3", "A3", "C4"], "C": ["C4", "E4", "G4"],
+    "G": ["G3", "B3", "D4"], "E": ["E3", "G#3", "B3"],
 }
-ROOTS = {"Em": "E2", "F": "F2", "C": "C2", "D": "D2", "B": "B1", "Am": "A2"}
-# root and fifth for the power-chord line
-POWER = {"Em": ("E4", "B4"), "F": ("F4", "C5"), "C": ("C4", "G4"), "D": ("D4", "A4"),
-         "B": ("B3", "F#4"), "Am": ("A4", "E5")}
+ROOTS = {"Am": "A1", "F": "F1", "C": "C2", "G": "G1", "E": "E1"}
+PAD = {"Am": "E4", "F": "C5", "C": "G4", "G": "D5", "E": "G#4"}
+
+
+def up(n, octaves=1):
+    return n[:-1] + str(int(n[-1]) + octaves)
 
 
 # ------------------------------------------------------------- Gyre theme
 
 def gyre_theme():
-    """E minor with a Phrygian edge, 180 BPM (5 frames per sixteenth),
-    16 bars. The E minor / F alternation grinds a semitone against the key;
-    B major bars pull hard back to the top. Everything runs in sixteenths:
-    galloping bass, rolling arpeggio, hi-hats, and a lead that is there
-    from the first bar and climbs an octave higher in the second half."""
-    BPM, SPB, BARS = 180, 4, 16
-    new = lambda: Song(BPM, SPB, BARS)
-    progression = ["Em", "F", "Em", "F", "C", "D", "B", "B",
-                   "Am", "Am", "Em", "Em", "F", "D", "B", "B"]
+    """Trance, A minor, 150 BPM (6 frames per sixteenth), 32 bars (51 s).
 
-    # one token per sixteenth: a note, '-' to hold, '.' to rest
-    lead16 = """
-    E5 - - E5 - - G5 -  E5 - - B5 - - A5 G5
-    F5 - - F5 - - A5 -  F5 - - C6 - - B5 A5
-    G5 - - E5 - - B5 -  - E6 - - D6 - C6 B5
-    C6 - B5 A5 - F5 - A5  C6 - B5 - A5 - G5 F5
-    E5 - G5 - C6 - G5 -  E5 - G5 - C6 - D6 -
-    F#5 - A5 - D6 - A5 -  F#5 - A5 - D6 - E6 -
-    D#6 - - - B5 - - -  F#5 - - - D#5 - - -
-    B4 - C5 - D#5 - E5 -  F#5 - G5 - A5 - B5 -
-    C6 - - - B5 - A5 -  E5 - - - A5 - C6 -
-    E6 - - - D6 - C6 -  B5 - A5 - G5 - A5 -
-    B5 - - - G5 - E5 -  G5 - B5 - E6 - - -
-    D6 - - - C6 - B5 -  A5 - G5 - F#5 - G5 -
-    A5 - - C6 - - F6 -  E6 - C6 - A5 - C6 -
-    D6 - - F#6 - - A6 -  F#6 - D6 - A5 - F#5 -
-    D#6 - - - F#6 - - -  B6 - - - A6 - G6 F#6
-    F#6 - - - D#6 - - -  B5 - - - . . . .
+      bars  1-8   groove: four-on-the-floor kick, rolling bass, offbeat
+                  open hats, gated sixteenth arpeggio, pad
+      bars  9-16  the anthem lead enters
+      bars 17-20  breakdown: kick and bass drop out, pad and lead carry it
+      bars 21-24  build: snare roll from eighths to sixteenths, rising run
+      bars 25-32  drop: everything back, chords change every bar, lead an
+                  octave higher
+
+    Seven voices: kick, hats, snare, bass, arpeggio, lead, pad."""
+    BPM, SPB, BARS = 150, 4, 32
+    new = lambda: Song(BPM, SPB, BARS)
+    progression = (["Am", "Am", "F", "F", "C", "C", "G", "G"] +
+                   ["Am", "Am", "F", "F", "C", "C", "G", "E"] +
+                   ["F", "F", "G", "G"] +
+                   ["Am", "Am", "E", "E"] +
+                   ["Am", "F", "C", "G", "Am", "F", "G", "E"])
+    assert len(progression) == BARS
+
+    def breakdown(bar):
+        return 16 <= bar < 20
+
+    def build(bar):
+        return 20 <= bar < 24
+
+    # lead, on an eighth-note grid (8 tokens per bar)
+    lead8 = """
+    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .
+    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .
+    A5 -  -  -  C6 -  B5 A5   E5 -  -  -  -  -  G5 A5   F5 -  -  -  A5 -  G5 F5   C5 -  -  -  -  -  E5 F5
+    G5 -  -  -  E5 -  G5 C6   B5 -  -  -  A5 -  G5 E5   D5 -  -  -  G5 -  B5 D6   B5 -  -  -  G#5 - -  -
+    A5 -  -  -  -  -  -  -    C6 -  -  -  -  -  -  -    B5 -  -  -  -  -  -  -    D6 -  -  -  -  -  -  -
+    E6 -  -  -  -  -  -  -    -  -  -  -  -  -  -  -    .  .  .  .  .  .  .  .    E5 F#5 G#5 A5 B5 C6 D6 E6
+    A6 -  -  -  C7 -  B6 A6   F6 -  -  -  A6 -  G6 F6   G6 -  -  -  E6 -  G6 C7   B6 -  -  -  D7 -  B6 G6
+    A6 -  -  -  G6 -  E6 C6   F6 -  -  -  E6 -  C6 A5   B5 -  D6 -  G6 -  F6 D6   E6 -  -  -  G#6 - B6 -
     """
+    lead16 = " ".join(t + " -" if t != "." else ". ." for t in lead8.split())
     assert len(lead16.split()) == BARS * 16
 
     def lead_part(s):
-        s.melody(0, lead16, "pulse", 0.30, duty=0.25, decay=0.25, sustain=0.6,
-                 gate=0.9, vibrato=0.006)
+        s.melody(0, lead16, "pulse", 0.27, duty=0.25, decay=0.6, sustain=0.6,
+                 gate=0.95, vibrato=0.008)
 
-    def power_part(s):
-        # root then fifth, half a bar each, under the whole song
+    def pad_part(s):
+        # one long note per bar; louder in the breakdown, where it carries the music
         for bar, ch in enumerate(progression):
-            root, fifth = POWER[ch]
-            s.tone(bar * 16, 8, root, "pulse", 0.12, duty=0.5, decay=0.4, sustain=0.5, gate=0.95)
-            s.tone(bar * 16 + 8, 8, fifth, "pulse", 0.12, duty=0.5, decay=0.4, sustain=0.5, gate=0.95)
+            gain = 0.15 if breakdown(bar) or build(bar) else 0.09
+            s.tone(bar * 16, 16, PAD[ch], "pulse", gain, duty=0.5, decay=0.9, sustain=0.6, gate=0.98)
 
     def arp_part(s):
+        # the trance gate: chord tones every sixteenth, short and accented
         for bar, ch in enumerate(progression):
             a, b, c = CHORDS[ch]
-            up = lambda n: n[:-1] + str(int(n[-1]) + 1)
-            seq = [up(a), up(b), up(c), up(up(a)), up(c), up(b)] * 3
+            seq = [up(a), up(c), up(a, 2), up(c), up(b), up(c), up(a, 2), up(b, 2)]
+            ramp = 1.0
+            if build(bar):
+                ramp = 0.5 + 0.5 * ((bar - 20) * 16) / 64.0
             for k in range(16):
-                s.tone(bar * 16 + k, 1, seq[k], "pulse", 0.07, duty=0.125,
-                       decay=0.05, sustain=0.0, gate=1.0)
+                accent = 1.25 if k % 4 == 2 else 1.0          # pushes the offbeat, like a pumping gate
+                s.tone(bar * 16 + k, 1, seq[k % 8], "pulse", 0.075 * accent * ramp, duty=0.125,
+                       decay=0.05, sustain=0.0, gate=0.9)
 
     def bass_part(s):
-        gallop = "R R O R  R O R O  R R O R  R O O R".split()
+        # rolling bass on the three sixteenths between kicks
         for bar, ch in enumerate(progression):
+            if breakdown(bar) or (build(bar) and bar < 22):
+                continue
             root = ROOTS[ch]
-            up = root[:-1] + str(int(root[-1]) + 1)
-            for k, g in enumerate(gallop):
-                s.tone(bar * 16 + k, 1, root if g == "R" else up, "triangle", 0.42, gate=0.6)
+            for k in range(16):
+                if k % 4 != 0:
+                    note = up(root) if k % 4 == 3 and k == 15 else up(root)
+                    s.tone(bar * 16 + k, 1, note, "triangle", 0.42, gate=0.55)
 
-    def drum_part(s):
+    def kick_part(s):
         for bar in range(BARS):
-            b = bar * 16
-            fill = bar % 8 == 7
-            for k in (0, 3, 8, 10):                     # syncopated kick
-                if not (fill and k >= 12):
-                    s.drum(b + k, "kick", 0.6)
-            s.drum(b + 4, "snare", 0.32)
-            if fill:
-                for k in (12, 13, 14, 15):              # snare roll into the next section
-                    s.drum(b + k, "snare", 0.22 + 0.04 * (k - 12))
-            else:
-                s.drum(b + 12, "snare", 0.32)
+            if breakdown(bar) or (build(bar) and bar < 22):
+                continue
+            for k in (0, 4, 8, 12):
+                s.drum(bar * 16 + k, "kick", 0.62)
 
     def hat_part(s):
         for bar in range(BARS):
-            for k in range(16):
-                if bar % 4 == 3 and k == 14:
-                    s.drum(bar * 16 + k, "ohat", 0.2)
-                elif not (bar % 4 == 3 and k == 15):
-                    s.drum(bar * 16 + k, "hat", 0.2 if k % 2 == 0 else 0.11)
+            if breakdown(bar):
+                continue
+            for k in (2, 6, 10, 14):
+                s.drum(bar * 16 + k, "ohat", 0.17)               # offbeat open hat
+            if not build(bar):
+                for k in range(1, 16, 2):
+                    s.drum(bar * 16 + k, "hat", 0.07)            # light sixteenths around it
+
+    def snare_part(s):
+        for bar in range(BARS):
+            b = bar * 16
+            if breakdown(bar):
+                continue
+            if build(bar):
+                # roll: eighths, then sixteenths, getting louder into the drop
+                step = 2 if bar < 22 else 1
+                for k in range(0, 16, step):
+                    progress = ((bar - 20) * 16 + k) / 64.0
+                    s.drum(b + k, "snare", 0.12 + 0.28 * progress)
+                continue
+            for k in (4, 12):
+                s.drum(b + k, "snare", 0.3)
 
     song = new()
     mix_layers(song, [
         (*layer(new, lead_part), None),
-        (*layer(new, power_part), None),
+        (*layer(new, pad_part), None),
         (*layer(new, arp_part), None),
         (*layer(new, bass_part), None),
-        (*layer(new, drum_part), None),
+        (*layer(new, kick_part), None),
         (*layer(new, hat_part), None),
+        (*layer(new, snare_part), None),
     ])
     return finish(*song.render(loop=True), 0.6)
 
