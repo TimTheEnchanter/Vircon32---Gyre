@@ -1,6 +1,6 @@
 # Gyre for Vircon32
 
-Version 0.1, the playable core. A tube shooter in the style of Tempest, built with `vector.h`.
+Version 0.1, the playable core (with the faster 180 BPM theme). A tube shooter in the style of Tempest, built with `vector.h`.
 
 Load **Gyre.v32** in the Vircon32 emulator.
 
