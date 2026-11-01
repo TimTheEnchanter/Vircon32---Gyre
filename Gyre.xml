@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rom-definition version="1.0">
+    <rom type="cartridge" title="Gyre" version="0.1" />
+    <binary path="obj/Gyre.vbin" />
+    <textures>
+        <texture path="vector_lines.vtex" />
+    </textures>
+    <sounds>
+        <sound path="sounds/fire.vsnd" />
+        <sound path="sounds/enemy_die.vsnd" />
+        <sound path="sounds/tanker_split.vsnd" />
+        <sound path="sounds/move.vsnd" />
+        <sound path="sounds/zapper.vsnd" />
+        <sound path="sounds/warp.vsnd" />
+        <sound path="sounds/death.vsnd" />
+        <sound path="sounds/spike_hit.vsnd" />
+        <sound path="sounds/enemy_fire.vsnd" />
+        <sound path="sounds/level_start.vsnd" />
+        <sound path="sounds/extra_life.vsnd" />
+        <sound path="sounds/grab.vsnd" />
+        <sound path="sounds/ins_pulse12.vsnd" />
+        <sound path="sounds/ins_pulse25.vsnd" />
+        <sound path="sounds/ins_pulse50.vsnd" />
+        <sound path="sounds/ins_triangle.vsnd" />
+        <sound path="sounds/drum_kick.vsnd" />
+        <sound path="sounds/drum_snare.vsnd" />
+        <sound path="sounds/drum_hat.vsnd" />
+        <sound path="sounds/drum_ohat.vsnd" />
+    </sounds>
+</rom-definition>
