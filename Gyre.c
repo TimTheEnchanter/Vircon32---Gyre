@@ -11,7 +11,7 @@
 // =============================================================================
 
 #define VEC_MAX_LINES 1100
-#define GYRE_VERSION "V0.7"
+#define GYRE_VERSION "V1.0"
 
 #include "video.h"
 #include "math.h"
@@ -184,6 +184,8 @@ int demo_seed = 0;
 int demo_frames = 0;
 int demo_score = 0;
 int demo_difficulty = 0;
+int demo_level = 1;                   // the level the recorded game started on
+int game_start_level = 1;
 int[ REC_WORDS ] demo_data;
 
 int read_gamepad_bits()
@@ -367,7 +369,8 @@ void table_merge( int value, int name )
 //   MEMORY CARD
 // -----------------------------------------------------------------------------
 //   Same layout as Rockfield, under Gyre's own signature (word offsets):
-//     0-19 signature   20 format version (5; 4 loads fully, 1-3 without their demo)
+//     0-19 signature   20 format version (6; 4-5 load fully, 1-3 without their demo)
+//     38 demo difficulty, plus its starting level << 8 (from format 6)
 //     39 secret stages ever found (bits; covered by the checksum at 37 from format 5)   21-25 scores   26-30 names
 //     31-33 demo seed, length, score   34 checksum of 21-33
 //     35 checksum of the demo   36 options   37 checksum of 36 and 38
@@ -383,7 +386,7 @@ void table_merge( int value, int name )
 #define SAVE_HEADER     16
 #define SAVE_EXTRA_AT   36
 #define SAVE_DEMO_AT    40
-#define SAVE_VERSION    5         // 5: remembers secrets found (format 4 demos still load)
+#define SAVE_VERSION    6         // 6: demos remember their starting level (formats 4-5 load fully)
 #define SAVE_KEY        0x2F6A9B3D
 
 #define SAVE_MSG_NONE      0
@@ -469,7 +472,9 @@ void load_save()
             demo_frames = save_header[ 12 ];
             demo_score = save_header[ 13 ];
             demo_difficulty = DIFF_NORMAL;
+            demo_level = 1;
             if( extra_ok ) demo_difficulty = save_extra[ 2 ] & 3;
+            if( extra_ok && save_header[ 0 ] >= 6 ) demo_level = max( 1, ( save_extra[ 2 ] >> 8 ) & 255 );
         }
     }
 }
@@ -522,7 +527,7 @@ int save_all()
     card_write_data( save_header, SAVE_OFFSET, SAVE_HEADER );
 
     save_extra[ 0 ] = pack_options();
-    save_extra[ 2 ] = demo_difficulty;
+    save_extra[ 2 ] = demo_difficulty | ( demo_level << 8 );
     save_extra[ 3 ] = secrets_ever;
     save_extra[ 1 ] = extra_checksum( true );
     card_write_data( save_extra, SAVE_EXTRA_AT, 4 );
@@ -543,6 +548,7 @@ void load_builtin_demo()
     demo_frames = builtin_demo_frames;
     demo_score = builtin_demo_score;
     demo_difficulty = DIFF_NORMAL;
+    demo_level = builtin_demo_level;
 }
 
 // -----------------------------------------------------------------------------
@@ -1305,6 +1311,8 @@ void begin_game( int seed, bool demo )
     secrets_found = 0;
     lives = diff_pick( 5, 3, 2 );
     level = 1;
+    if( demo ) level = demo_level;
+    game_start_level = level;
     next_extra_life = 20000;
     paused = false;
     fire_cooldown = 0;
@@ -1403,6 +1411,7 @@ void finish_game()
         demo_frames = rec_frames;
         demo_score = score;
         demo_difficulty = game_difficulty;
+        demo_level = game_start_level;
         demo_changed = true;
     }
 
@@ -2458,6 +2467,7 @@ float wy( int i )
 void draw_web()
 {
     int i, k, n;
+    bool rim_only;
     float z0;
 
     vec_thickness( 2 );
@@ -2469,13 +2479,17 @@ void draw_web()
     if( !web_closed ) n = web_points - 1;
     if( phase == PHASE_BONUS && bonus_stage == SECRET_DARK && in_game() ) n = 0;
 
+    // behind the high score table only the rim is drawn: that page is full of text
+    rim_only = ( state == STATE_TITLE && title_page == PAGE_SCORES );
+
     for( i = 0; i < n && n > 0; i++ )
     {
         k = ( i + 1 ) % web_points;
         vec_line_3d( wx( i ), wy( i ), 0, wx( k ), wy( k ), 0 );            // rim
-        vec_line_3d( wx( i ), wy( i ), DEPTH, wx( k ), wy( k ), DEPTH );    // far end
+        if( !rim_only )
+          vec_line_3d( wx( i ), wy( i ), DEPTH, wx( k ), wy( k ), DEPTH );  // far end
     }
-    if( n > 0 )
+    if( n > 0 && !rim_only )
       for( i = 0; i < web_points; i++ )
         vec_line_3d( wx( i ), wy( i ), 0, wx( i ), wy( i ), DEPTH );        // lane edges
 
