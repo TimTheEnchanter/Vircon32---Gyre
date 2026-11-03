@@ -11,7 +11,7 @@
 // =============================================================================
 
 #define VEC_MAX_LINES 1100
-#define GYRE_VERSION "V0.3"
+#define GYRE_VERSION "V0.5"
 
 #include "video.h"
 #include "math.h"
@@ -272,6 +272,7 @@ bool in_game()
 #define PHASE_FIGHT   1
 #define PHASE_WARP    2           // diving down the tube to the next web
 #define PHASE_DEAD    3           // claw destroyed, waiting to respawn
+#define PHASE_BONUS   4           // a secret bonus stage
 
 int phase;
 int phase_timer;
@@ -359,7 +360,7 @@ void table_merge( int value, int name )
 //   MEMORY CARD
 // -----------------------------------------------------------------------------
 //   Same layout as Rockfield, under Gyre's own signature (word offsets):
-//     0-19 signature   20 format version (2; format 1 loads without its demo)   21-25 scores   26-30 names
+//     0-19 signature   20 format version (4; formats 1-3 load without their demo)   21-25 scores   26-30 names
 //     31-33 demo seed, length, score   34 checksum of 21-33
 //     35 checksum of the demo   36 options   37 checksum of 36 and 38
 //     38 demo difficulty   40- demo recording (REC_WORDS words)
@@ -374,7 +375,7 @@ void table_merge( int value, int name )
 #define SAVE_HEADER     16
 #define SAVE_EXTRA_AT   36
 #define SAVE_DEMO_AT    40
-#define SAVE_VERSION    2         // 2: fuseballs and pulsars (v1 demos are dropped)
+#define SAVE_VERSION    4         // 4: secret stages (older demos are dropped)
 #define SAVE_KEY        0x2F6A9B3D
 
 #define SAVE_MSG_NONE      0
@@ -429,7 +430,7 @@ void load_save()
     bool extra_ok;
 
     card_read_data( save_header, SAVE_OFFSET, SAVE_HEADER );
-    if( save_header[ 0 ] != SAVE_VERSION && save_header[ 0 ] != 1 ) return;
+    if( save_header[ 0 ] < 1 || save_header[ 0 ] > SAVE_VERSION ) return;
     if( save_header[ 14 ] != checksum( &save_header[ 1 ], 13 ) ) return;
 
     card_read_data( save_extra, SAVE_EXTRA_AT, 3 );
@@ -443,7 +444,7 @@ void load_save()
     for( i = 0; i < HS_COUNT; i++ )
       table_merge( save_header[ 1 + i ], save_header[ 6 + i ] );
 
-    // a format 1 demo was recorded before fuseballs and pulsars and might not replay
+    // a demo from an older format was recorded under older rules and might not replay
     if( save_header[ 0 ] == SAVE_VERSION && save_header[ 13 ] > demo_score
         && save_header[ 12 ] > 0 && save_header[ 12 ] <= REC_MAX_FRAMES )
     {
@@ -538,7 +539,7 @@ void load_builtin_demo()
 
 #define MAX_POINTS  16
 #define DEPTH       4.0
-#define WEB_COUNT   6
+#define WEB_COUNT   16
 
 float[ MAX_POINTS ] web_x;
 float[ MAX_POINTS ] web_y;
@@ -556,6 +557,17 @@ void set_point( int i, float x, float y )
 {
     web_x[ i ] = x;
     web_y[ i ] = y;
+}
+
+void compute_lane_centers()
+{
+    int i, k;
+    for( i = 0; i < lanes; i++ )
+    {
+        k = ( i + 1 ) % web_points;
+        lane_cx[ i ] = ( web_x[ i ] + web_x[ k ] ) * 0.5;
+        lane_cy[ i ] = ( web_y[ i ] + web_y[ k ] ) * 0.5;
+    }
 }
 
 void build_web( int shape )
@@ -614,22 +626,120 @@ void build_web( int shape )
             set_point( i, cos( a ) * r, sin( a ) * r );
         }
     }
-    else                        // flat strip, seen from above the far end
+    else if( shape == 5 )       // flat strip, seen from above the far end
     {
         web_closed = false;
         for( i = 0; i < 16; i++ )
           set_point( i, -1.45 + 2.9 * i / 15.0, 0.75 );
     }
+    else if( shape == 6 )       // triangle: sides of 5, 6 and 5 lanes
+    {
+        for( i = 0; i < 5; i++ )
+        {
+            t = i / 5.0;
+            set_point( i, 1.1 * t, -1.0 + 1.85 * t );                 // top to bottom right
+            set_point( 11 + i, -1.1 + 1.1 * t, 0.85 - 1.85 * t );     // bottom left to top
+        }
+        for( i = 0; i < 6; i++ )
+          set_point( 5 + i, 1.1 - 2.2 * i / 6.0, 0.85 );              // along the bottom
+    }
+    else if( shape == 7 )       // heart: evenly spaced in angle, so the lanes vary
+    {
+        for( i = 0; i < 16; i++ )
+        {
+            a = i * 6.2831853 / 16;
+            r = sin( a );
+            set_point( i, r * r * r * 16 / 17.0 * 1.1,
+                       -( 13 * cos( a ) - 5 * cos( 2 * a ) - 2 * cos( 3 * a ) - cos( 4 * a ) ) / 17.0 * 0.95 + 0.05 );
+        }
+    }
+    else if( shape == 8 )       // open W
+    {
+        web_closed = false;
+        for( i = 0; i < 16; i++ )
+        {
+            t = i / 15.0 * 4;                 // 0..4 along the four strokes
+            k = t;
+            if( k > 3 ) k = 3;
+            r = t - k;                        // 0..1 along stroke k
+            if( k % 2 == 0 ) set_point( i, -1.35 + 0.675 * t, -0.6 + 1.45 * r );
+            else             set_point( i, -1.35 + 0.675 * t, 0.85 - 1.45 * r );
+            if( k == 1 ) web_y[ i ] = 0.85 - 1.05 * r;          // the middle peak is lower
+            if( k == 2 ) web_y[ i ] = -0.2 + 1.05 * r;
+        }
+    }
+    else if( shape == 9 )       // peanut, pinched in the middle
+    {
+        for( i = 0; i < 16; i++ )
+        {
+            a = -1.5707963 + i * 6.2831853 / 16 + 3.14159 / 16;
+            r = 0.42 + 0.58 * fabs( cos( a ) );
+            set_point( i, cos( a ) * r * 1.3, sin( a ) * r * 1.4 );
+        }
+    }
+    else if( shape == 10 )      // open U
+    {
+        web_closed = false;
+        for( i = 0; i < 16; i++ )
+        {
+            a = 3.14159265 - 3.14159265 * i / 15.0;
+            set_point( i, cos( a ) * 1.25, -0.6 + 1.45 * sin( a ) );
+        }
+    }
+    else if( shape == 11 )      // diamond, 4 lanes per side
+    {
+        for( i = 0; i < 4; i++ )
+        {
+            t = i / 4.0;
+            set_point( i,      1.2 * t,         -1.0 + t );
+            set_point( 4 + i,  1.2 - 1.2 * t,   t );
+            set_point( 8 + i,  -1.2 * t,        1.0 - t );
+            set_point( 12 + i, -1.2 + 1.2 * t,  -t );
+        }
+    }
+    else if( shape == 12 )      // open battlement: a flat strip with square teeth
+    {
+        web_closed = false;
+        set_point( 0, -1.35, 0.8 );
+        for( i = 1; i < 16; i++ )
+        {
+            // segments run along, up, along, down, along, up ...
+            if( i % 2 ) set_point( i, web_x[ i - 1 ] + 0.3375, web_y[ i - 1 ] );
+            else if( i % 4 == 2 ) set_point( i, web_x[ i - 1 ], web_y[ i - 1 ] - 0.32 );
+            else set_point( i, web_x[ i - 1 ], web_y[ i - 1 ] + 0.32 );
+        }
+    }
+    else if( shape == 13 )      // lopsided egg, wider at the bottom right
+    {
+        for( i = 0; i < 16; i++ )
+        {
+            a = -1.5707963 + i * 6.2831853 / 16 + 3.14159 / 16;
+            r = 1.0 + 0.2 * sin( a ) + 0.1 * cos( a );
+            set_point( i, cos( a ) * r * 1.1, sin( a ) * r * 0.85 + 0.05 );
+        }
+    }
+    else if( shape == 14 )      // open S wave
+    {
+        web_closed = false;
+        for( i = 0; i < 16; i++ )
+        {
+            t = i / 15.0;
+            set_point( i, -1.4 + 2.8 * t, 0.2 - 0.6 * sin( 6.2831853 * t ) );
+        }
+    }
+    else                        // open C: a ring with a gap at the top
+    {
+        web_closed = false;
+        for( i = 0; i < 16; i++ )
+        {
+            a = -1.5707963 + 0.75 + i * ( 6.2831853 - 1.5 ) / 15.0;
+            set_point( i, cos( a ) * 1.05, sin( a ) * 1.05 );
+        }
+    }
 
     lanes = web_points;
     if( !web_closed ) lanes = web_points - 1;
-
-    for( i = 0; i < lanes; i++ )
-    {
-        k = ( i + 1 ) % web_points;
-        lane_cx[ i ] = ( web_x[ i ] + web_x[ k ] ) * 0.5;
-        lane_cy[ i ] = ( web_y[ i ] + web_y[ k ] ) * 0.5;
-    }
+    compute_lane_centers();
 }
 
 int lane_next_point( int lane )
@@ -696,6 +806,22 @@ float edge_y( int lane, int side )
 //   PLAYER CLAW
 // -----------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------
+//   SECRETS: hidden warps to bonus stages (each found once per game)
+// -----------------------------------------------------------------------------
+
+#define SECRET_SPIN    0              // statue: cleared a level without moving
+#define SECRET_GEMS    1              // spike diver: shot away a spike in your lane mid-dive
+#define SECRET_DARK    2              // last gasp: the weak superzapper finished the level
+#define SECRET_SWARM   3              // untouched: level 5+, no life lost, no superzapper
+
+int secrets_found = 0;                // bit per secret
+bool claw_moved = false;              // this level
+bool statue_ok = false;               // decided when the level is cleared
+bool swarm_ok = false;
+bool spike_dive = false;              // set during the dive
+bool last_gasp = false;
+
 int claw_lane;
 int claw_from;                        // lane the claw is sliding from
 float claw_slide = 1;                 // 0..1 progress of that slide
@@ -730,6 +856,7 @@ void move_claw( float dx, float dy )
 
     if( best >= 0 )
     {
+        claw_moved = true;
         claw_from = claw_lane;
         claw_slide = 0;
         claw_lane = best;
@@ -876,6 +1003,9 @@ int[ MAX_ENEMIES ] en_pulse;          // pulsar: countdown to its next pulse
 
 #define PULSE_FRAMES 24
 int hint_timer = 0;                   // "new enemy" note under the level banner
+bool level_clean = true;              // no life lost on this level yet
+
+int bonus_shown = 0;                  // perfect-level bonus being displayed
 
 int spawn_total;                      // enemies this level
 int spawned;
@@ -891,7 +1021,10 @@ int count_enemies()
 
 float base_speed()
 {
-    return ( 0.010 + level * 0.0012 ) * diff_pickf( 0.8, 1.0, 1.2 );
+    // a gentle climb for the first six levels, steeper after that, capped
+    float v = 0.010 + level * 0.0012 + max( level - 6, 0 ) * 0.0008;
+    if( v > 0.033 ) v = 0.033;
+    return v * diff_pickf( 0.8, 1.0, 1.2 );
 }
 
 int spawn_enemy( int type, int lane, float z )
@@ -934,6 +1067,11 @@ int spawn_enemy( int type, int lane, float z )
 int pick_enemy_type()
 {
     int r = grand() % 100;
+    if( level >= 7 )
+    {
+        if( r >= 84 ) return EN_PULSAR;
+        if( r >= 68 ) return EN_FUSEBALL;
+    }
     if( level >= 5 && r >= 88 ) return EN_PULSAR;
     if( level >= 4 && r >= 76 ) return EN_FUSEBALL;
     if( level >= 3 && r < 20 ) return EN_SPIKER;
@@ -984,9 +1122,15 @@ void kill_enemy( int i, bool split )
     }
     else add_score( 100 );
 
-    burst_at( en_lane[ i ], en_z[ i ], 14, 2.5, 0xFFFFFFFF );
-    if( en_type[ i ] == EN_FUSEBALL ) burst_at( en_lane[ i ], en_z[ i ], 10, 1.6, 0xFF40FF40 );
-    if( en_type[ i ] == EN_PULSAR ) burst_at( en_lane[ i ], en_z[ i ], 10, 1.6, 0xFF2090FF );
+    // a superzapper mass kill uses small bursts: the screen pulse covers it,
+    // and ten full bursts in one frame would overrun the CPU budget
+    if( quiet_kills ) burst_at( en_lane[ i ], en_z[ i ], 5, 2.5, 0xFFFFFFFF );
+    else
+    {
+        burst_at( en_lane[ i ], en_z[ i ], 14, 2.5, 0xFFFFFFFF );
+        if( en_type[ i ] == EN_FUSEBALL ) burst_at( en_lane[ i ], en_z[ i ], 10, 1.6, 0xFF40FF40 );
+        if( en_type[ i ] == EN_PULSAR ) burst_at( en_lane[ i ], en_z[ i ], 10, 1.6, 0xFF2090FF );
+    }
     if( !quiet_kills ) sfx_pitched( SND_ENEMY_DIE, 0.45, fx_range( 0.9, 1.1 ) );
     en_active[ i ] = false;
 }
@@ -1036,6 +1180,7 @@ void kill_claw()
         burst( sx, sy, 20, 2.0, 4, 0xFFFFFFFF );
     }
 
+    level_clean = false;
     sfx( SND_DEATH, 0.75 );
     add_shake( 10 );
     add_flash( 0.5, 0xFFC0E0FF );
@@ -1065,11 +1210,11 @@ int web_glow;
 
 void set_level_colors()
 {
-    int group = ( ( level - 1 ) / WEB_COUNT ) % 4;
+    int group = ( ( level - 1 ) / 4 ) % 4;
     if( group == 0 )      { web_color = 0xFFFFA040; web_glow = 0xFF803010; }    // blue
     else if( group == 1 ) { web_color = 0xFF4060FF; web_glow = 0xFF101880; }    // red
     else if( group == 2 ) { web_color = 0xFF60FF60; web_glow = 0xFF108010; }    // green
-    else                  { web_color = 0xFF40E0FF; web_glow = 0xFF106080; }    // yellow
+    else                  { web_color = 0xFFFFFF40; web_glow = 0xFF808010; }    // cyan
 }
 
 void start_level()
@@ -1091,6 +1236,13 @@ void start_level()
     zapper_uses = 0;
 
     spawn_total = min( 8 + level * 2, 32 );
+    level_clean = true;
+    claw_moved = false;
+    statue_ok = false;
+    swarm_ok = false;
+    spike_dive = false;
+    last_gasp = false;
+    bonus_shown = 0;
     hint_timer = 0;
     if( level == 4 || level == 5 ) hint_timer = 330;
     spawned = 0;
@@ -1127,6 +1279,7 @@ void begin_game( int seed, bool demo )
     input_lock = false;
 
     score = 0;
+    secrets_found = 0;
     lives = diff_pick( 5, 3, 2 );
     level = 1;
     next_extra_life = 20000;
@@ -1510,6 +1663,7 @@ void update_pause_menu()
 // -----------------------------------------------------------------------------
 
 void use_zapper();
+int bonus_stage = -1;
 
 void update_claw()
 {
@@ -1533,10 +1687,12 @@ void update_claw()
 
     // fire
     if( fire_cooldown > 0 ) fire_cooldown--;
-    if( ( in_bits & IN_FIRE ) && fire_cooldown == 0 )
+    if( ( in_bits & IN_FIRE ) && fire_cooldown == 0
+        && !( phase == PHASE_BONUS && bonus_stage == SECRET_GEMS ) )
     {
         fire_shot();
         fire_cooldown = 6;
+        if( phase == PHASE_BONUS && bonus_stage == SECRET_SWARM ) fire_cooldown = 3;     // rapid fire
     }
 
     // superzapper
@@ -1558,7 +1714,11 @@ void update_shots()
           if( spike_top[ shot_lane[ s ] ] < DEPTH && shot_z[ s ] >= spike_top[ shot_lane[ s ] ] )
           {
               spike_top[ shot_lane[ s ] ] += 0.35;
-              if( spike_top[ shot_lane[ s ] ] > DEPTH - 0.1 ) spike_top[ shot_lane[ s ] ] = DEPTH;
+              if( spike_top[ shot_lane[ s ] ] > DEPTH - 0.1 )
+              {
+                  spike_top[ shot_lane[ s ] ] = DEPTH;
+                  if( phase == PHASE_WARP && shot_lane[ s ] == claw_lane ) spike_dive = true;
+              }
               shot_active[ s ] = false;
               add_score( 3 );
               sfx( SND_SPIKE_HIT, 0.4 );
@@ -1708,7 +1868,7 @@ bool update_pulsar( int i )
     // pulse cycle: charge (the lane flickers), then the lane is live
     en_pulse[ i ]--;
     if( en_pulse[ i ] == 0 ) sfx( SND_PULSE, 0.45 );
-    if( en_pulse[ i ] <= -PULSE_FRAMES ) en_pulse[ i ] = diff_pick( 190, 150, 120 );
+    if( en_pulse[ i ] <= -PULSE_FRAMES ) en_pulse[ i ] = diff_pick( 190, 150, 120 ) - min( max( level - 6, 0 ) * 4, 40 );
 
     if( en_pulse[ i ] <= 0 && phase == PHASE_FIGHT && enemy_lane( i ) == claw_lane )
     {
@@ -1716,6 +1876,13 @@ bool update_pulsar( int i )
         return true;
     }
     return false;
+}
+
+// how many enemies may be in the tube at once
+int max_in_tube()
+{
+    if( level <= 6 ) return 8;
+    return min( 8 + ( level - 6 ) / 2, 10 );
 }
 
 void update_enemies()
@@ -1726,7 +1893,7 @@ void update_enemies()
     if( spawned < spawn_total )
     {
         spawn_timer--;
-        if( spawn_timer <= 0 && count_enemies() < 8 )
+        if( spawn_timer <= 0 && count_enemies() < max_in_tube() )
         {
             if( spawn_enemy( pick_enemy_type(), grand() % lanes, DEPTH ) >= 0 ) spawned++;
             spawn_timer = ( max( 75 - level * 4, 25 ) + grand() % 30 ) * diff_pickf( 1.3, 1.0, 0.8 );
@@ -1842,8 +2009,10 @@ void use_zapper()
           if( en_active[ ( k + i ) % MAX_ENEMIES ] )
           {
               kill_enemy( ( k + i ) % MAX_ENEMIES, false );
+              n = 1;
               break;
           }
+        if( n == 1 && spawned >= spawn_total && count_enemies() == 0 ) last_gasp = true;
         zap_flash_timer = 15;
     }
 
@@ -1866,9 +2035,215 @@ void update_particles()
       }
 }
 
+// -----------------------------------------------------------------------------
+//   BONUS STAGES
+// -----------------------------------------------------------------------------
+
+#define MAX_TARGETS     16
+#define BONUS_PERFECT   5000
+#define BONUS_END       160           // frames the result is shown
+
+bool[ MAX_TARGETS ] bt_active;
+int[ MAX_TARGETS ] bt_lane;
+float[ MAX_TARGETS ] bt_z;
+int bonus_total;
+int bonus_spawned;
+int bonus_hits;
+int bonus_spawn_timer;
+int bonus_last_lane;
+int bonus_end_timer;
+float[ MAX_POINTS ] spin_base_x;
+float[ MAX_POINTS ] spin_base_y;
+
+int pick_secret()
+{
+    if( statue_ok && !( secrets_found & 1 ) ) return SECRET_SPIN;
+    if( spike_dive && !( secrets_found & 2 ) ) return SECRET_GEMS;
+    if( last_gasp && !( secrets_found & 4 ) ) return SECRET_DARK;
+    if( swarm_ok && !( secrets_found & 8 ) ) return SECRET_SWARM;
+    return -1;
+}
+
+int bonus_value()
+{
+    if( bonus_stage == SECRET_GEMS ) return 250;
+    if( bonus_stage == SECRET_SWARM ) return 60;
+    if( bonus_stage == SECRET_DARK ) return 150;
+    return 100;
+}
+
+void start_bonus( int stage )
+{
+    int i;
+
+    secrets_found = secrets_found | ( 1 << stage );
+    bonus_stage = stage;
+
+    if( stage == SECRET_SPIN ) build_web( 0 );          // circle
+    else if( stage == SECRET_GEMS ) build_web( 5 );     // flat strip
+    else if( stage == SECRET_DARK ) build_web( 7 );     // heart, unseen
+    else build_web( 1 );                                // square
+    web_color = 0xFF40D0FF;                             // gold
+    web_glow = 0xFF105080;
+    for( i = 0; i < web_points; i++ )
+    {
+        spin_base_x[ i ] = web_x[ i ];
+        spin_base_y[ i ] = web_y[ i ];
+    }
+
+    clear_spikes();
+    for( i = 0; i < MAX_ENEMIES; i++ ) en_active[ i ] = false;
+    for( i = 0; i < MAX_SHOTS; i++ ) shot_active[ i ] = false;
+    for( i = 0; i < MAX_ESHOTS; i++ ) eshot_active[ i ] = false;
+    for( i = 0; i < MAX_TARGETS; i++ ) bt_active[ i ] = false;
+
+    claw_lane = lanes / 2;
+    claw_from = claw_lane;
+    claw_slide = 1;
+    claw_z = 0;
+    cam_z = -7;
+    hint_timer = 0;
+    bonus_shown = 0;
+
+    bonus_total = 30;
+    if( stage == SECRET_DARK ) bonus_total = 24;
+    if( stage == SECRET_SWARM ) bonus_total = 48;
+    bonus_spawned = 0;
+    bonus_hits = 0;
+    bonus_spawn_timer = 110;
+    bonus_end_timer = 0;
+
+    phase = PHASE_BONUS;
+    phase_timer = 0;
+    sfx( SND_EXTRA_LIFE, 0.6 );
+}
+
+void hit_target( int t )
+{
+    bonus_hits++;
+    add_score( bonus_value() );
+    bt_active[ t ] = false;
+    burst_at( bt_lane[ t ], fmax( bt_z[ t ], 0.05 ), 8, 2.0, 0xFF60E0FF );
+    sfx_pitched( SND_SPIKE_HIT, 0.5, 1.0 + 0.5 * bonus_hits / bonus_total );
+}
+
+void update_bonus()
+{
+    int i, t, s;
+    float a, c, sn, speed;
+
+    // fly in, like a level
+    if( phase_timer < 70 ) cam_z += ( CAM_Z_NORMAL - cam_z ) * 0.08;
+    else cam_z = CAM_Z_NORMAL;
+
+    // spin cycle: the web itself turns, claw and all
+    if( bonus_stage == SECRET_SPIN )
+    {
+        a = phase_timer * 0.006;
+        c = cos( a );
+        sn = sin( a );
+        for( i = 0; i < web_points; i++ )
+        {
+            web_x[ i ] = spin_base_x[ i ] * c - spin_base_y[ i ] * sn;
+            web_y[ i ] = spin_base_x[ i ] * sn + spin_base_y[ i ] * c;
+        }
+        compute_lane_centers();
+    }
+
+    update_claw();
+    update_shots();
+
+    // shots against orbs (gems can't be shot)
+    if( bonus_stage != SECRET_GEMS )
+      for( s = 0; s < MAX_SHOTS; s++ )
+        if( shot_active[ s ] )
+          for( t = 0; t < MAX_TARGETS; t++ )
+            if( bt_active[ t ] && bt_lane[ t ] == shot_lane[ s ]
+                && bt_z[ t ] >= shot_z[ s ] - SHOT_SPEED - 0.15 && bt_z[ t ] <= shot_z[ s ] + 0.15 )
+            {
+                shot_active[ s ] = false;
+                hit_target( t );
+                break;
+            }
+
+    if( bonus_end_timer > 0 )
+    {
+        bonus_end_timer++;
+        if( bonus_end_timer > BONUS_END )
+        {
+            bonus_stage = -1;
+            level++;
+            add_score( 0 );
+            start_level();
+        }
+        return;
+    }
+
+    // targets stream up from the far end
+    if( bonus_spawned < bonus_total )
+    {
+        bonus_spawn_timer--;
+        if( bonus_spawn_timer <= 0 )
+        {
+            for( t = 0; t < MAX_TARGETS; t++ )
+              if( !bt_active[ t ] )
+              {
+                  bt_active[ t ] = true;
+                  bt_lane[ t ] = grand() % lanes;
+                  if( bonus_stage == SECRET_GEMS && bonus_spawned > 0 )
+                  {
+                      // gems follow a trail you can keep up with
+                      bt_lane[ t ] = bonus_last_lane + bt_lane[ t ] % 7 - 3;
+                      if( bt_lane[ t ] < 0 ) bt_lane[ t ] = -bt_lane[ t ];
+                      if( bt_lane[ t ] >= lanes ) bt_lane[ t ] = 2 * ( lanes - 1 ) - bt_lane[ t ];
+                  }
+                  bonus_last_lane = bt_lane[ t ];
+                  bt_z[ t ] = DEPTH;
+                  bonus_spawned++;
+                  break;
+              }
+            bonus_spawn_timer = 30;
+            if( bonus_stage == SECRET_GEMS ) bonus_spawn_timer = 26;
+            if( bonus_stage == SECRET_DARK ) bonus_spawn_timer = 36;
+            if( bonus_stage == SECRET_SWARM ) bonus_spawn_timer = 11;
+        }
+    }
+
+    speed = 0.025;
+    if( bonus_stage == SECRET_GEMS ) speed = 0.03;
+    if( bonus_stage == SECRET_DARK ) speed = 0.022;
+    if( bonus_stage == SECRET_SWARM ) speed = 0.034;
+
+    for( t = 0; t < MAX_TARGETS; t++ )
+      if( bt_active[ t ] )
+      {
+          bt_z[ t ] -= speed;
+          if( bt_z[ t ] <= 0 )
+          {
+              // gems are caught by the claw; anything else at the rim is missed
+              if( bonus_stage == SECRET_GEMS && bt_lane[ t ] == claw_lane ) hit_target( t );
+              else bt_active[ t ] = false;
+          }
+      }
+
+    // all done: show the result
+    if( bonus_spawned >= bonus_total )
+    {
+        for( t = 0; t < MAX_TARGETS; t++ )
+          if( bt_active[ t ] ) return;
+        bonus_end_timer = 1;
+        if( bonus_hits == bonus_total )
+        {
+            add_score( BONUS_PERFECT );
+            sfx( SND_EXTRA_LIFE, 0.6 );
+        }
+        else sfx( SND_LEVEL_START, 0.5 );
+    }
+}
+
 void update_playing()
 {
-    int i, bits;
+    int i, k, bits;
 
     if( !demo_mode )
     {
@@ -1931,6 +2306,17 @@ void update_playing()
             phase = PHASE_WARP;
             phase_timer = 0;
             sfx( SND_WARP, 0.55 );
+
+            statue_ok = !claw_moved;
+            swarm_ok = level >= 5 && level_clean && zapper_uses == 0;
+
+            // no life lost on this level: a bonus
+            if( level_clean )
+            {
+                bonus_shown = level * 500;
+                add_score( bonus_shown );
+                sfx( SND_LEVEL_START, 0.5 );
+            }
         }
     }
     else if( phase == PHASE_WARP )
@@ -1949,10 +2335,19 @@ void update_playing()
         }
         else if( claw_z > DEPTH + 0.5 )
         {
-            level++;
-            add_score( 0 );
-            start_level();
+            k = pick_secret();
+            if( k >= 0 ) start_bonus( k );
+            else
+            {
+                level++;
+                add_score( 0 );
+                start_level();
+            }
         }
+    }
+    else if( phase == PHASE_BONUS )
+    {
+        update_bonus();
     }
     else if( phase == PHASE_DEAD )
     {
@@ -2025,15 +2420,17 @@ void draw_web()
 
     n = web_points;
     if( !web_closed ) n = web_points - 1;
+    if( phase == PHASE_BONUS && bonus_stage == SECRET_DARK && in_game() ) n = 0;
 
-    for( i = 0; i < n; i++ )
+    for( i = 0; i < n && n > 0; i++ )
     {
         k = ( i + 1 ) % web_points;
         vec_line_3d( wx( i ), wy( i ), 0, wx( k ), wy( k ), 0 );            // rim
         vec_line_3d( wx( i ), wy( i ), DEPTH, wx( k ), wy( k ), DEPTH );    // far end
     }
-    for( i = 0; i < web_points; i++ )
-      vec_line_3d( wx( i ), wy( i ), 0, wx( i ), wy( i ), DEPTH );          // lane edges
+    if( n > 0 )
+      for( i = 0; i < web_points; i++ )
+        vec_line_3d( wx( i ), wy( i ), 0, wx( i ), wy( i ), DEPTH );        // lane edges
 
     // the claw's lane glows brighter
     if( in_game() && state != STATE_GAMEOVER && phase != PHASE_DEAD )
@@ -2310,6 +2707,117 @@ void draw_spikes_and_shots()
       }
 }
 
+float number_width( int value, float size );
+
+// bonus targets: orbs (spinning diamonds) and gems (pulsing, with a sparkle)
+void draw_targets()
+{
+    int t;
+    float px, py, s, a;
+
+    if( phase != PHASE_BONUS ) return;
+    vec_thickness( 2 );
+    vec_glow_size( 14 );
+    for( t = 0; t < MAX_TARGETS; t++ )
+      if( bt_active[ t ] && vec_project( lane_cx[ bt_lane[ t ] ], lane_cy[ bt_lane[ t ] ], bt_z[ t ], &px, &py ) )
+      {
+          s = FOCAL / ( bt_z[ t ] - cam_z ) * 0.11;
+          if( bonus_stage == SECRET_GEMS )
+          {
+              s *= 1.0 + 0.15 * sin( anim * 0.3 + t );
+              vec_color( 0xFF60FFC0, 0xFF206040 );
+              vec_line( px, py - s, px + s * 0.7, py );
+              vec_line( px + s * 0.7, py, px, py + s );
+              vec_line( px, py + s, px - s * 0.7, py );
+              vec_line( px - s * 0.7, py, px, py - s );
+              vec_line( px - s * 0.7, py, px + s * 0.7, py );
+              if( ( anim / 6 + t ) % 4 == 0 )
+              {
+                  vec_color( 0xFFFFFFFF, 0 );
+                  vec_line( px + s * 0.5, py - s * 0.9, px + s * 0.9, py - s * 0.5 );
+              }
+          }
+          else
+          {
+              a = anim * 0.12 + t;
+              vec_color( 0xFFFFE080, 0xFF805020 );
+              if( bonus_stage == SECRET_SWARM ) vec_color( 0xFF80FFFF, 0xFF208080 );
+              vec_line( px + cos( a ) * s, py + sin( a ) * s, px + cos( a + 1.5708 ) * s, py + sin( a + 1.5708 ) * s );
+              vec_line( px + cos( a + 1.5708 ) * s, py + sin( a + 1.5708 ) * s, px + cos( a + 3.1416 ) * s, py + sin( a + 3.1416 ) * s );
+              vec_line( px + cos( a + 3.1416 ) * s, py + sin( a + 3.1416 ) * s, px + cos( a + 4.7124 ) * s, py + sin( a + 4.7124 ) * s );
+              vec_line( px + cos( a + 4.7124 ) * s, py + sin( a + 4.7124 ) * s, px + cos( a ) * s, py + sin( a ) * s );
+          }
+      }
+}
+
+void draw_bonus_hud()
+{
+    int* name;
+    int* how;
+    float x, f;
+
+    if( bonus_stage == SECRET_SPIN )      { name = "SPIN CYCLE"; how = "SHOOT THE ORBS AS THE WEB TURNS"; }
+    else if( bonus_stage == SECRET_GEMS ) { name = "GEM RUSH";   how = "CATCH THE GEMS WITH THE CLAW - NO FIRING"; }
+    else if( bonus_stage == SECRET_DARK ) { name = "DARK WEB";   how = "THE WEB IS HIDDEN - SHOOT THE ORBS"; }
+    else                                  { name = "SWARM";      how = "RAPID FIRE - SHOOT THEM ALL"; }
+
+    // title card while it starts
+    if( phase_timer < 150 && bonus_end_timer == 0 )
+    {
+        f = fmin( 1.0, fmin( phase_timer / 12.0, ( 150 - phase_timer ) / 20.0 ) );
+        vec_intensity( f );
+        vec_thickness( 2.5 );
+        vec_glow_size( 18 );
+        vec_color( 0xFF40D0FF, 0xFF105080 );
+        vec_text_centered( "SECRET STAGE", 320, 112, 11 );
+        vec_thickness( 2 );
+        vec_glow_size( 14 );
+        vec_color( 0xFFFFFFFF, 0xFF705050 );
+        vec_text_centered( name, 320, 150, 9 );
+        vec_thickness( 1.5 );
+        vec_glow_size( 10 );
+        vec_color( 0xFFFFE0A0, 0 );
+        vec_text_centered( how, 320, 343, 5 );
+        vec_intensity( 1 );
+    }
+
+    // running count
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
+    vec_color( 0xFF40D0FF, 0 );
+    x = 16;
+    vec_number( bonus_hits, x, 56, 5 );
+    x += number_width( bonus_hits, 5 );
+    vec_text( " OF ", x, 56, 5 );
+    vec_number( bonus_total, x + vec_text_width( " OF ", 5 ), 56, 5 );
+
+    // result
+    if( bonus_end_timer > 0 )
+    {
+        f = fmin( 1.0, fmin( bonus_end_timer / 12.0, ( BONUS_END - bonus_end_timer ) / 20.0 ) );
+        vec_intensity( f );
+        vec_thickness( 2.5 );
+        vec_glow_size( 18 );
+        if( bonus_hits == bonus_total )
+        {
+            vec_color( 0xFF60FFFF, 0xFF205050 );
+            vec_text_centered( "PERFECT", 320, 120, 12 );
+            vec_thickness( 2 );
+            vec_glow_size( 14 );
+            vec_color( 0xFFFFFFFF, 0xFF705050 );
+            x = 320 - ( vec_text_width( "BONUS ", 8 ) + number_width( BONUS_PERFECT, 8 ) ) / 2;
+            vec_text( "BONUS", x, 166, 8 );
+            vec_number( BONUS_PERFECT, x + vec_text_width( "BONUS ", 8 ), 166, 8 );
+        }
+        else
+        {
+            vec_color( 0xFF40D0FF, 0xFF105080 );
+            vec_text_centered( "STAGE OVER", 320, 120, 12 );
+        }
+        vec_intensity( 1 );
+    }
+}
+
 void draw_particles()
 {
     int i;
@@ -2376,6 +2884,14 @@ void draw_pause_menu()
     vec_text_centered( "UP DOWN SELECT   B CHOOSE   START RESUME", 320, 280, 4.2 );
 }
 
+bool any_spikes()
+{
+    int i;
+    for( i = 0; i < lanes; i++ )
+      if( spike_top[ i ] < DEPTH ) return true;
+    return false;
+}
+
 void draw_hud()
 {
     int i;
@@ -2440,7 +2956,23 @@ void draw_hud()
         vec_intensity( 1 );
     }
 
-    if( phase == PHASE_WARP && phase_timer < 50 )
+    if( phase == PHASE_WARP && bonus_shown > 0 && phase_timer < 100 )
+    {
+        vec_intensity( fmin( 1.0, ( 100 - phase_timer ) / 20.0 ) );
+        vec_thickness( 2.2 );
+        vec_glow_size( 13 );
+        vec_color( 0xFF60FFFF, 0xFF205050 );
+        vec_text_centered( "PERFECT LEVEL", 320, 124, 9 );
+        vec_thickness( 1.8 );
+        vec_glow_size( 10 );
+        vec_color( 0xFFFFFFFF, 0xFF705050 );
+        x = 320 - ( vec_text_width( "BONUS ", 7 ) + number_width( bonus_shown, 7 ) ) / 2;
+        vec_text( "BONUS", x, 158, 7 );
+        vec_number( bonus_shown, x + vec_text_width( "BONUS ", 7 ), 158, 7 );
+        vec_intensity( 1 );
+    }
+
+    if( phase == PHASE_WARP && phase_timer < 50 && any_spikes() )
     {
         vec_thickness( 2 );
         vec_glow_size( 14 );
@@ -2939,6 +3471,7 @@ void main()
         if( !menu_screen && state != STATE_OPTIONS )
         {
             draw_spikes_and_shots();
+            draw_targets();
             draw_enemies();
             if( state != STATE_GAMEOVER ) draw_claw();
         }
@@ -2956,6 +3489,7 @@ void main()
         else
         {
             draw_hud();
+            if( phase == PHASE_BONUS && state != STATE_GAMEOVER ) draw_bonus_hud();
             if( state == STATE_GAMEOVER ) draw_game_over();
             if( state == STATE_DEMO ) draw_demo_overlay();
         }

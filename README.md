@@ -1,6 +1,6 @@
 # Gyre for Vircon32
 
-Version 0.3: all five enemy types, high scores, options, a pause menu and an attract demo. A tube shooter in the style of Tempest, built with `vector.h`.
+Version 0.5: sixteen webs, four secret stages, all five enemy types, high scores, options, a pause menu and an attract demo. A tube shooter in the style of Tempest, built with `vector.h`.
 
 Load **Gyre.v32** in the Vircon32 emulator.
 
@@ -28,7 +28,31 @@ Levels 4 and 5 show a one-line note about the new enemy under the level banner.
 
 **Levels.** When a level's last enemy is gone, the claw dives down the tube to the next web. A spike in your lane during the dive destroys you, so move to a clear lane or shoot the spike away first.
 
-There are six webs: circle, square, plus, V, star and a flat strip. After those they repeat in a new color, faster.
+There are sixteen webs, one per level, then they repeat:
+
+| Levels | Webs |
+|---|---|
+| 1–6 | Circle, square, plus, V, star, flat strip |
+| 7–16 | Triangle, heart, W, peanut, U, diamond, battlement, lopsided egg, S-wave, and a C with a gap at the top |
+
+Several are open (the claw can't go all the way round) or have lanes of uneven width. The web changes color every four levels.
+
+The first six levels climb gently. After that, enemies speed up faster (up to a cap), up to ten can be in the tube at once instead of eight, fuseballs and pulsars become more common, and pulsars pulse more often.
+
+**Perfect level bonus:** clear a level without losing a life and you score 500 × the level number.
+
+## Secret stages
+
+Four bonus stages are hidden behind secret warps. Doing something unusual on a level sends the dive to a secret stage instead of the next web. Afterwards the game carries on with the next level. Each stage can be found once per game.
+
+| Stage | What happens |
+|---|---|
+| Spin Cycle | The web slowly turns, claw and all. Shoot the orbs, 100 each. |
+| Gem Rush | Gems climb a flat strip in a trail. Catch them with the claw, 250 each. Firing is off. |
+| Dark Web | The web is invisible apart from your own lane. Shoot the orbs, 150 each. |
+| Swarm | Rapid fire against 48 orbs, 60 each. |
+
+No lives are at risk on a secret stage. Every target counts toward the total, and hitting or catching all of them adds a 5,000 bonus. How to reach them is in **Spoilers** at the end.
 
 Extra life every 20,000 points.
 
@@ -69,7 +93,7 @@ The demo is a real replay: each game records its inputs (the first 60 seconds) a
 
 ## Memory card
 
-Insert a card and Gyre saves the table, the demo and the options. Cards saved by 0.2 (format 1) keep their table and options, but their demo is dropped, because it was recorded before fuseballs and pulsars existed. A blank card is claimed with the signature `GYRE TUBE SHOOTER V1`; a card belonging to another game is never written to. Each part has its own checksum, and damaged parts are ignored. The layout is the same as Rockfield's (format version 2 here):
+Insert a card and Gyre saves the table, the demo and the options. Cards saved by earlier versions (formats 1 to 3) keep their table and options, but their demo is dropped, because it was recorded under older rules and might not replay correctly. A blank card is claimed with the signature `GYRE TUBE SHOOTER V1`; a card belonging to another game is never written to. Each part has its own checksum, and damaged parts are ignored. The layout is the same as Rockfield's (format version 4 here):
 
 | Words | Contents |
 |---|---|
@@ -116,4 +140,16 @@ packrom Gyre.xml -o Gyre.v32
 
 ## Next
 
-- More level variety: more web shapes, and a steeper climb after the first six levels.
+- Game feel: crumbling spikes, a smoother fly-in, the final level on the game over screen, and a warning before the claw is grabbed.
+- More music: a title track, a game over sting and a level-clear fanfare.
+
+## Spoilers: the secret warps
+
+| Stage | How to get there |
+|---|---|
+| Spin Cycle | Clear a level without moving the claw. |
+| Gem Rush | During the dive, shoot away a spike in your lane before you reach it. |
+| Dark Web | Finish a level with the second, weaker superzapper: it must destroy the level's last enemy. |
+| Swarm | From level 5 on, clear a level without losing a life and without using the superzapper. |
+
+If one level qualifies for more than one, the first stage in this table that you haven't found yet is used.
