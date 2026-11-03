@@ -338,8 +338,239 @@ def gyre_theme():
     return finish(*song.render(loop=True), 0.6)
 
 
+# ------------------------------------------------------------- title theme
+
+CHORDS.update({"Dm": ["D4", "F4", "A4"], "Bb": ["A#3", "D4", "F4"], "Gm": ["G3", "A#3", "D4"],
+               "A": ["A3", "C#4", "E4"]})
+ROOTS.update({"Dm": "D2", "Bb": "A#1", "Gm": "G1", "A": "A1", "Am": "A1"})
+PAD.update({"Dm": "A4", "Bb": "D5", "Gm": "D5", "A": "C#5"})
+
+
+def title_theme():
+    """Half-time synthwave, D minor, 128.6 BPM (7 frames per sixteenth),
+    16 bars (31 s), for the title pages and the attract demo.
+
+      bars  1-4   pad and a soft arpeggio
+      bars  5-8   bass and half-time drums join
+      bars  9-16  the lead: long notes with vibrato
+
+    Seven voices: lead, pad, arpeggio, bass, kick, snare, hats."""
+    BPM, SPB, BARS = 900 / 7, 4, 16
+    new = lambda: Song(BPM, SPB, BARS)
+    progression = ["Dm", "Bb", "F", "C"] * 4
+
+    lead8 = """
+    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .
+    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .    .  .  .  .  .  .  .  .
+    A5 -  -  -  -  -  F5 G5   F5 -  -  -  D5 -  -  -    C5 -  -  -  -  -  F5 A5   G5 -  -  -  -  -  -  -
+    A5 -  -  -  -  -  C6 A#5  A#5 - -  -  A5 -  F5 -    A5 -  -  -  G5 -  F5 -    E5 -  -  -  -  -  -  -
+    """
+    lead16 = " ".join(t + " -" if t != "." else ". ." for t in lead8.split())
+    assert len(lead16.split()) == BARS * 16
+
+    def lead_part(s):
+        s.melody(0, lead16, "pulse", 0.25, duty=0.25, decay=0.8, sustain=0.65,
+                 gate=0.95, vibrato=0.008)
+
+    def pad_part(s):
+        for bar, ch in enumerate(progression):
+            s.tone(bar * 16, 16, PAD[ch], "pulse", 0.11, duty=0.5, decay=0.9, sustain=0.6, gate=0.98)
+
+    def arp_part(s):
+        for bar, ch in enumerate(progression):
+            a, b, c = CHORDS[ch]
+            seq = [a, b, c, up(a), c, b]
+            for k in range(0, 16, 2):                     # eighths, a slow shimmer
+                s.tone(bar * 16 + k, 2, up(seq[(k // 2) % 6]), "pulse", 0.06, duty=0.125,
+                       decay=0.15, sustain=0.0, gate=0.8)
+
+    def bass_part(s):
+        for bar, ch in enumerate(progression):
+            if bar < 4:
+                continue
+            root = ROOTS[ch]
+            for k in (0, 3, 6, 8, 11, 14):                # a driving dotted pattern
+                s.tone(bar * 16 + k, 2, up(root), "triangle", 0.4, gate=0.6)
+
+    def kick_part(s):
+        for bar in range(4, BARS):
+            for k in (0, 10):
+                s.drum(bar * 16 + k, "kick", 0.55)
+
+    def snare_part(s):
+        for bar in range(4, BARS):
+            s.drum(bar * 16 + 8, "snare", 0.3)            # half time: one snare per bar
+
+    def hat_part(s):
+        for bar in range(4, BARS):
+            for k in range(2, 16, 4):
+                s.drum(bar * 16 + k, "hat", 0.08)
+
+    song = new()
+    mix_layers(song, [
+        (*layer(new, lead_part), None),
+        (*layer(new, pad_part), None),
+        (*layer(new, arp_part), None),
+        (*layer(new, bass_part), None),
+        (*layer(new, kick_part), None),
+        (*layer(new, snare_part), None),
+        (*layer(new, hat_part), None),
+    ])
+    return finish(*song.render(loop=True), 0.6)
+
+
+# ------------------------------------------------------------- secret stages
+
+def secret_theme():
+    """Bouncy, F major, 150 BPM, 8 bars (12.8 s): octave-jumping bass, a
+    staccato hook, sparkling arpeggio, four-on-the-floor."""
+    BPM, SPB, BARS = 150, 4, 8
+    new = lambda: Song(BPM, SPB, BARS)
+    CH = {"F": ["F4", "A4", "C5"], "Dm": ["D4", "F4", "A4"], "Bb": ["A#3", "D4", "F4"],
+          "C": ["C4", "E4", "G4"], "Am": ["A3", "C4", "E4"]}
+    RT = {"F": "F2", "Dm": "D2", "Bb": "A#1", "C": "C2", "Am": "A1"}
+    progression = ["F", "Dm", "Bb", "C", "F", "Am", "Bb", "C"]
+
+    hook = """
+    F5 .  A5 .  C6 .  A5 .  G5 .  F5 .  D5 .  .  .     F5 .  A5 .  D6 .  C6 .  A5 .  F5 .  .  .  .  .
+    D5 .  F5 .  A#5 . A5 .  G5 .  F5 .  G5 .  .  .     C6 .  .  .  A#5 . A5 .  G5 .  E5 .  C5 .  .  .
+    F5 .  A5 .  C6 .  A5 .  G5 .  F5 .  D5 .  .  .     E5 .  G5 .  C6 .  B5 .  A5 .  E5 .  .  .  .  .
+    D5 .  F5 .  A#5 . D6 .  C6 .  A#5 . A5 .  G5 .     C6 -  -  .  C6 .  D6 .  E6 -  -  -  .  .  .  .
+    """
+    assert len(hook.split()) == BARS * 16
+
+    def lead_part(s):
+        s.melody(0, hook, "pulse", 0.24, duty=0.5, decay=0.12, sustain=0.3, gate=0.7)
+
+    def arp_part(s):
+        for bar, ch in enumerate(progression):
+            a, b, c = CH[ch]
+            seq = [up(a), up(b), up(c), up(a, 2)]
+            for k in range(16):
+                s.tone(bar * 16 + k, 1, seq[k % 4], "pulse", 0.05, duty=0.125,
+                       decay=0.04, sustain=0.0, gate=0.8)
+
+    def pad_part(s):
+        for bar, ch in enumerate(progression):
+            s.tone(bar * 16, 16, CH[ch][1], "pulse", 0.07, duty=0.25, decay=0.6, sustain=0.5, gate=0.97)
+
+    def bass_part(s):
+        for bar, ch in enumerate(progression):
+            root = RT[ch]
+            for k in range(0, 16, 2):
+                note = up(root) if k % 4 == 0 else up(root, 2)       # the bounce: octave jumps
+                s.tone(bar * 16 + k, 1, note, "triangle", 0.42, gate=0.7)
+
+    def kick_part(s):
+        for bar in range(BARS):
+            for k in (0, 4, 8, 12):
+                s.drum(bar * 16 + k, "kick", 0.55)
+
+    def snare_part(s):
+        for bar in range(BARS):
+            for k in (4, 12):
+                s.drum(bar * 16 + k, "snare", 0.3)
+            if bar == BARS - 1:
+                for k in (13, 14, 15):
+                    s.drum(bar * 16 + k, "snare", 0.22)            # a little fill into the loop
+
+    def hat_part(s):
+        for bar in range(BARS):
+            for k in range(0, 16, 2):
+                s.drum(bar * 16 + k + 1, "hat", 0.07 if k % 4 else 0.1)
+
+    song = new()
+    mix_layers(song, [
+        (*layer(new, lead_part), None),
+        (*layer(new, arp_part), None),
+        (*layer(new, pad_part), None),
+        (*layer(new, bass_part), None),
+        (*layer(new, kick_part), None),
+        (*layer(new, snare_part), None),
+        (*layer(new, hat_part), None),
+    ])
+    return finish(*song.render(loop=True), 0.6)
+
+
+# ------------------------------------------------------------- jingles
+
+def clear_fanfare():
+    """Level cleared: a rising A minor to A major fanfare, about 3 s."""
+    BPM, SPB, BARS = 150, 4, 2
+    new = lambda: Song(BPM, SPB, BARS)
+
+    def lead_part(s):
+        s.melody(0, "A4 . C5 . E5 . A5 - - - . . E5 . A5 . C#6 - - - - - - - - - - - - - . .",
+                 "pulse", 0.28, duty=0.25, decay=0.5, sustain=0.6, gate=0.95, vibrato=0.008)
+
+    def harmony_part(s):
+        s.melody(0, "E4 . A4 . C5 . E5 - - - . . C#5 . E5 . A5 - - - - - - - - - - - - - . .",
+                 "pulse", 0.14, duty=0.5, decay=0.5, sustain=0.5, gate=0.95)
+
+    def bass_part(s):
+        s.melody(0, "A2 . . . . . A2 - - - . . E2 . . . A2 - - - - - - - - - - - . . . .",
+                 "triangle", 0.45, gate=0.9)
+
+    def drum_part(s):
+        for k in (0, 6, 12, 16):
+            s.drum(k, "kick", 0.55)
+        s.drum(16, "ohat", 0.25)
+
+    def roll_part(s):
+        for k in (8, 9, 10, 11, 13, 14, 15):
+            s.drum(k, "snare", 0.14 + 0.02 * (k - 8))
+
+    song = new()
+    mix_layers(song, [
+        (*layer(new, lead_part), None),
+        (*layer(new, harmony_part), None),
+        (*layer(new, bass_part), None),
+        (*layer(new, drum_part), None),
+        (*layer(new, roll_part), None),
+    ])
+    return finish(*song.render(loop=False), 0.6)
+
+
+def gameover_sting():
+    """Game over: a slow falling phrase over a held A minor, about 5 s."""
+    BPM, SPB, BARS = 100, 4, 3
+    new = lambda: Song(BPM, SPB, BARS)
+
+    def lead_part(s):
+        s.melody(0, "E5 - - - D5 - - - C5 - - - B4 - - -  C5 - - - B4 - - - G#4 - - - - - - -  A4 - - - - - - - - - - - - - . .",
+                 "pulse", 0.26, duty=0.25, decay=0.7, sustain=0.6, gate=0.95, vibrato=0.008)
+
+    def pad_part(s):
+        s.tone(0, 16, "C5", "pulse", 0.1, duty=0.5, decay=1.2, sustain=0.5, gate=0.98)
+        s.tone(16, 16, "B4", "pulse", 0.1, duty=0.5, decay=1.2, sustain=0.5, gate=0.98)
+        s.tone(32, 14, "A4", "pulse", 0.1, duty=0.5, decay=1.2, sustain=0.5, gate=0.98)
+
+    def bass_part(s):
+        s.tone(0, 16, "A2", "triangle", 0.4, gate=0.95)
+        s.tone(16, 16, "E2", "triangle", 0.4, gate=0.95)
+        s.tone(32, 14, "A2", "triangle", 0.4, gate=0.95)
+
+    def drum_part(s):
+        s.drum(0, "kick", 0.5)
+        s.drum(32, "kick", 0.5)
+        s.drum(32, "ohat", 0.2)
+
+    song = new()
+    mix_layers(song, [
+        (*layer(new, lead_part), None),
+        (*layer(new, pad_part), None),
+        (*layer(new, bass_part), None),
+        (*layer(new, drum_part), None),
+    ])
+    return finish(*song.render(loop=False), 0.6)
+
+
 TRACKS = [
     ("game", gyre_theme),
+    ("title", title_theme),
+    ("secret", secret_theme),
+    ("clear", clear_fanfare),
+    ("gameover", gameover_sting),
 ]
 
 

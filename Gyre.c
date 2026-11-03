@@ -11,7 +11,7 @@
 // =============================================================================
 
 #define VEC_MAX_LINES 1100
-#define GYRE_VERSION "V0.5"
+#define GYRE_VERSION "V0.7"
 
 #include "video.h"
 #include "math.h"
@@ -67,10 +67,17 @@ float sfx_level()
     return opt_sfx / 10.0;
 }
 
+int game_music_pos = 0;                // where the in-game track was left
+
+// the in-game track resumes where it left off after a jingle or secret stage
 void play_track( int track, float volume )
 {
+    int current = music_current();
     music_base = volume;
-    music_play( track, volume * opt_music / 10.0 );
+    if( current == MUSIC_GAME && track != MUSIC_GAME ) game_music_pos = music_position();
+    if( track == MUSIC_GAME && current != MUSIC_GAME )
+      music_play_at( track, volume * opt_music / 10.0, game_music_pos );
+    else music_play( track, volume * opt_music / 10.0 );
 }
 
 void apply_music_volume()
@@ -360,7 +367,8 @@ void table_merge( int value, int name )
 //   MEMORY CARD
 // -----------------------------------------------------------------------------
 //   Same layout as Rockfield, under Gyre's own signature (word offsets):
-//     0-19 signature   20 format version (4; formats 1-3 load without their demo)   21-25 scores   26-30 names
+//     0-19 signature   20 format version (5; 4 loads fully, 1-3 without their demo)
+//     39 secret stages ever found (bits; covered by the checksum at 37 from format 5)   21-25 scores   26-30 names
 //     31-33 demo seed, length, score   34 checksum of 21-33
 //     35 checksum of the demo   36 options   37 checksum of 36 and 38
 //     38 demo difficulty   40- demo recording (REC_WORDS words)
@@ -375,7 +383,7 @@ void table_merge( int value, int name )
 #define SAVE_HEADER     16
 #define SAVE_EXTRA_AT   36
 #define SAVE_DEMO_AT    40
-#define SAVE_VERSION    4         // 4: secret stages (older demos are dropped)
+#define SAVE_VERSION    5         // 5: remembers secrets found (format 4 demos still load)
 #define SAVE_KEY        0x2F6A9B3D
 
 #define SAVE_MSG_NONE      0
@@ -387,7 +395,8 @@ int* save_signature_text = "GYRE TUBE SHOOTER V1";   // exactly 20 characters
 int card_state = CARD_NONE;
 bool card_loaded = false;
 int[ SAVE_HEADER ] save_header;
-int[ 3 ] save_extra;
+int[ 4 ] save_extra;
+int secrets_ever = 0;                 // secret stages found in any game (saved)
 int[ REC_WORDS ] card_demo;
 
 int checksum( int* data, int count )
@@ -416,11 +425,14 @@ void unpack_options( int word )
     opt_flash = ( ( word >> 11 ) & 1 ) != 0;
 }
 
-int extra_checksum()
+// options, demo difficulty and (from format 5) the secrets found
+int extra_checksum( bool with_secrets )
 {
-    int[ 2 ] w;
+    int[ 3 ] w;
     w[ 0 ] = save_extra[ 0 ];
     w[ 1 ] = save_extra[ 2 ];
+    w[ 2 ] = save_extra[ 3 ];
+    if( with_secrets ) return checksum( w, 3 );
     return checksum( w, 2 );
 }
 
@@ -433,8 +445,9 @@ void load_save()
     if( save_header[ 0 ] < 1 || save_header[ 0 ] > SAVE_VERSION ) return;
     if( save_header[ 14 ] != checksum( &save_header[ 1 ], 13 ) ) return;
 
-    card_read_data( save_extra, SAVE_EXTRA_AT, 3 );
-    extra_ok = ( save_extra[ 1 ] == extra_checksum() && ( save_extra[ 0 ] & ( 1 << 12 ) ) );
+    card_read_data( save_extra, SAVE_EXTRA_AT, 4 );
+    extra_ok = ( save_extra[ 1 ] == extra_checksum( save_header[ 0 ] >= 5 ) && ( save_extra[ 0 ] & ( 1 << 12 ) ) );
+    if( extra_ok && save_header[ 0 ] >= 5 ) secrets_ever = secrets_ever | ( save_extra[ 3 ] & 15 );
     if( extra_ok )
     {
         unpack_options( save_extra[ 0 ] );
@@ -445,7 +458,7 @@ void load_save()
       table_merge( save_header[ 1 + i ], save_header[ 6 + i ] );
 
     // a demo from an older format was recorded under older rules and might not replay
-    if( save_header[ 0 ] == SAVE_VERSION && save_header[ 13 ] > demo_score
+    if( save_header[ 0 ] >= 4 && save_header[ 13 ] > demo_score
         && save_header[ 12 ] > 0 && save_header[ 12 ] <= REC_MAX_FRAMES )
     {
         card_read_data( card_demo, SAVE_DEMO_AT, REC_WORDS );
@@ -510,8 +523,9 @@ int save_all()
 
     save_extra[ 0 ] = pack_options();
     save_extra[ 2 ] = demo_difficulty;
-    save_extra[ 1 ] = extra_checksum();
-    card_write_data( save_extra, SAVE_EXTRA_AT, 3 );
+    save_extra[ 3 ] = secrets_ever;
+    save_extra[ 1 ] = extra_checksum( true );
+    card_write_data( save_extra, SAVE_EXTRA_AT, 4 );
 
     card_state = CARD_OURS;
     return SAVE_MSG_SAVED;
@@ -784,6 +798,14 @@ int lane_delta( int a, int b )
 float cam_z = CAM_Z_NORMAL;
 float web_spin = 0;                   // title screen rotates the web
 
+// the fly-in: from far behind the web to the normal view over 70 frames,
+// fast at first and settling gently (cubic ease-out)
+float fly_in_cam( int t )
+{
+    float u = 1.0 - fmin( 1.0, t / 70.0 );
+    return CAM_Z_NORMAL + ( -7.0 - CAM_Z_NORMAL ) * u * u * u;
+}
+
 void set_camera()
 {
     vec_camera( 320, 172, FOCAL, 0, CAM_Y, cam_z );
@@ -815,7 +837,8 @@ float edge_y( int lane, int side )
 #define SECRET_DARK    2              // last gasp: the weak superzapper finished the level
 #define SECRET_SWARM   3              // untouched: level 5+, no life lost, no superzapper
 
-int secrets_found = 0;                // bit per secret
+int secrets_found = 0;                // bit per secret, this game
+bool secrets_dirty = false;           // a new one to save to the card
 bool claw_moved = false;              // this level
 bool statue_ok = false;               // decided when the level is cleared
 bool swarm_ok = false;
@@ -1303,11 +1326,12 @@ void begin_game( int seed, bool demo )
     if( demo )
     {
         state = STATE_DEMO;
-        play_track( MUSIC_GAME, 0.3 );
+        play_track( MUSIC_TITLE, 0.45 );
     }
     else
     {
         state = STATE_PLAYING;
+        game_music_pos = 0;
         play_track( MUSIC_GAME, 0.5 );
     }
 }
@@ -1346,7 +1370,7 @@ void enter_title_page( int page )
     title_page = page;
     state = STATE_TITLE;
     state_timer = 0;
-    play_track( MUSIC_GAME, 0.3 );
+    play_track( MUSIC_TITLE, 0.45 );
 }
 
 void enter_title()
@@ -1382,7 +1406,8 @@ void finish_game()
         demo_changed = true;
     }
 
-    play_track( MUSIC_GAME, 0.3 );
+    if( table_rank( score ) >= 0 ) play_track( MUSIC_TITLE, 0.45 );
+    else play_track( MUSIC_GAMEOVER, 0.55 );
 
     if( table_rank( score ) >= 0 )
     {
@@ -1398,7 +1423,8 @@ void finish_game()
     }
 
     save_message = SAVE_MSG_NONE;
-    if( demo_changed ) save_message = save_all();
+    if( demo_changed || secrets_dirty ) save_message = save_all();
+    secrets_dirty = false;
     state = STATE_GAMEOVER;
     state_timer = 0;
 }
@@ -1414,6 +1440,7 @@ void finish_entry()
     table_insert( score, pack_name( name ) | ( game_difficulty << 24 ), entry_rank );
     high_score = hs_score[ 0 ];
     save_message = save_all();
+    secrets_dirty = false;
     sfx( SND_LEVEL_START, 0.6 );
     highlight_rank = entry_rank;
     enter_title_page( PAGE_SCORES );
@@ -1652,7 +1679,14 @@ void update_pause_menu()
         else
         {
             // abandon the game: not scored, never becomes the demo
+            // (but a secret found on the way is still remembered)
             paused = false;
+            if( secrets_dirty )
+            {
+                refresh_card();
+                if( card_state == CARD_OURS || card_state == CARD_EMPTY ) save_all();
+                secrets_dirty = false;
+            }
             enter_title();
         }
     }
@@ -1713,16 +1747,20 @@ void update_shots()
           // spikes: each hit shortens the spike from the top
           if( spike_top[ shot_lane[ s ] ] < DEPTH && shot_z[ s ] >= spike_top[ shot_lane[ s ] ] )
           {
+              // chips fly off the tip (particles only)
+              burst_at( shot_lane[ s ], spike_top[ shot_lane[ s ] ], 5, 1.4, 0xFF60FF60 );
               spike_top[ shot_lane[ s ] ] += 0.35;
               if( spike_top[ shot_lane[ s ] ] > DEPTH - 0.1 )
               {
+                  // the last piece shatters
+                  burst_at( shot_lane[ s ], DEPTH - 0.15, 10, 1.8, 0xFF60FF60 );
+                  burst_at( shot_lane[ s ], DEPTH - 0.15, 6, 1.0, 0xFFFFFFFF );
                   spike_top[ shot_lane[ s ] ] = DEPTH;
                   if( phase == PHASE_WARP && shot_lane[ s ] == claw_lane ) spike_dive = true;
               }
               shot_active[ s ] = false;
               add_score( 3 );
               sfx( SND_SPIKE_HIT, 0.4 );
-              burst_at( shot_lane[ s ], shot_z[ s ], 3, 1.0, 0xFF60FF60 );
               continue;
           }
 
@@ -2051,6 +2089,7 @@ int bonus_spawned;
 int bonus_hits;
 int bonus_spawn_timer;
 int bonus_last_lane;
+bool bonus_new_secret = false;
 int bonus_end_timer;
 float[ MAX_POINTS ] spin_base_x;
 float[ MAX_POINTS ] spin_base_y;
@@ -2078,6 +2117,14 @@ void start_bonus( int stage )
 
     secrets_found = secrets_found | ( 1 << stage );
     bonus_stage = stage;
+    bonus_new_secret = false;
+    if( !demo_mode && !( secrets_ever & ( 1 << stage ) ) )
+    {
+        // first time ever: remembered on the card at the end of the game
+        secrets_ever = secrets_ever | ( 1 << stage );
+        bonus_new_secret = true;
+        secrets_dirty = true;
+    }
 
     if( stage == SECRET_SPIN ) build_web( 0 );          // circle
     else if( stage == SECRET_GEMS ) build_web( 5 );     // flat strip
@@ -2133,7 +2180,7 @@ void update_bonus()
     float a, c, sn, speed;
 
     // fly in, like a level
-    if( phase_timer < 70 ) cam_z += ( CAM_Z_NORMAL - cam_z ) * 0.08;
+    if( phase_timer < 70 ) cam_z = fly_in_cam( phase_timer );
     else cam_z = CAM_Z_NORMAL;
 
     // spin cycle: the web itself turns, claw and all
@@ -2235,7 +2282,7 @@ void update_bonus()
         if( bonus_hits == bonus_total )
         {
             add_score( BONUS_PERFECT );
-            sfx( SND_EXTRA_LIFE, 0.6 );
+            if( !demo_mode ) play_track( MUSIC_CLEAR, 0.55 );
         }
         else sfx( SND_LEVEL_START, 0.5 );
     }
@@ -2283,8 +2330,8 @@ void update_playing()
 
     if( phase == PHASE_FLYIN )
     {
-        // camera eases in from far behind the web
-        cam_z += ( CAM_Z_NORMAL - cam_z ) * 0.08;
+        // camera eases in from far behind the web, slowing as it arrives
+        cam_z = fly_in_cam( phase_timer );
         if( phase_timer > 70 )
         {
             cam_z = CAM_Z_NORMAL;
@@ -2315,8 +2362,8 @@ void update_playing()
             {
                 bonus_shown = level * 500;
                 add_score( bonus_shown );
-                sfx( SND_LEVEL_START, 0.5 );
             }
+            if( !demo_mode ) play_track( MUSIC_CLEAR, 0.55 );
         }
     }
     else if( phase == PHASE_WARP )
@@ -2466,6 +2513,8 @@ float ly( int lane, int to, float t, float side )
     return a + ( b - a ) * t;
 }
 
+bool claw_in_danger();
+
 void draw_claw()
 {
     int lane = claw_lane;
@@ -2489,6 +2538,16 @@ void draw_claw()
     vec_thickness( 2.5 );
     vec_glow_size( 20 );
     vec_color( 0xFF40FFFF, 0xFF108080 );
+
+    // about to be grabbed: flash red and tremble
+    if( claw_in_danger() )
+    {
+        if( ( anim / 4 ) % 2 == 0 ) vec_color( 0xFF4040FF, 0xFF1010A0 );
+        else vec_color( 0xFFC0C0FF, 0xFF4040A0 );
+        x0 += fx_range( -0.012, 0.012 );  y0 += fx_range( -0.012, 0.012 );
+        x1 += fx_range( -0.012, 0.012 );  y1 += fx_range( -0.012, 0.012 );
+        pulse = 0.04 * sin( anim * 0.9 );
+    }
 
     // two prongs reaching toward the viewer, joined at the back
     vec_line_3d( x0, y0, z, x0 + ( cx - x0 ) * 0.45, y0 + ( cy - y0 ) * 0.45, z - 0.12 - pulse );
@@ -2750,16 +2809,24 @@ void draw_targets()
       }
 }
 
+int* secret_name( int k )
+{
+    if( k == SECRET_SPIN ) return "SPIN CYCLE";
+    if( k == SECRET_GEMS ) return "GEM RUSH";
+    if( k == SECRET_DARK ) return "DARK WEB";
+    return "SWARM";
+}
+
 void draw_bonus_hud()
 {
-    int* name;
+    int* name = secret_name( bonus_stage );
     int* how;
     float x, f;
 
-    if( bonus_stage == SECRET_SPIN )      { name = "SPIN CYCLE"; how = "SHOOT THE ORBS AS THE WEB TURNS"; }
-    else if( bonus_stage == SECRET_GEMS ) { name = "GEM RUSH";   how = "CATCH THE GEMS WITH THE CLAW - NO FIRING"; }
-    else if( bonus_stage == SECRET_DARK ) { name = "DARK WEB";   how = "THE WEB IS HIDDEN - SHOOT THE ORBS"; }
-    else                                  { name = "SWARM";      how = "RAPID FIRE - SHOOT THEM ALL"; }
+    if( bonus_stage == SECRET_SPIN )      how = "SHOOT THE ORBS AS THE WEB TURNS";
+    else if( bonus_stage == SECRET_GEMS ) how = "CATCH THE GEMS WITH THE CLAW - NO FIRING";
+    else if( bonus_stage == SECRET_DARK ) how = "THE WEB IS HIDDEN - SHOOT THE ORBS";
+    else                                  how = "RAPID FIRE - SHOOT THEM ALL";
 
     // title card while it starts
     if( phase_timer < 150 && bonus_end_timer == 0 )
@@ -2774,6 +2841,13 @@ void draw_bonus_hud()
         vec_glow_size( 14 );
         vec_color( 0xFFFFFFFF, 0xFF705050 );
         vec_text_centered( name, 320, 150, 9 );
+        if( bonus_new_secret && ( anim / 12 ) % 2 == 0 )
+        {
+            vec_thickness( 1.8 );
+            vec_glow_size( 12 );
+            vec_color( 0xFF60FFFF, 0xFF205050 );
+            vec_text_centered( "NEW SECRET FOUND", 320, 182, 6 );
+        }
         vec_thickness( 1.5 );
         vec_glow_size( 10 );
         vec_color( 0xFFFFE0A0, 0 );
@@ -3065,13 +3139,27 @@ void draw_title()
 
 void draw_game_over()
 {
-    float t = fmin( 1.0, state_timer / 30.0 );
+    float t = fmin( 1.0, state_timer / 30.0 ), x;
 
     vec_intensity( t );
     vec_thickness( 3 );
     vec_glow_size( 22 );
     vec_color( 0xFF8080FF, 0xFF202070 );
     vec_text_centered( "GAME OVER", 320, 120 - 20 * ( 1 - t ), 18 );
+
+    // what you reached
+    vec_intensity( t * fmin( 1.0, fmax( 0.0, ( state_timer - 20 ) / 20.0 ) ) );
+    vec_thickness( 2 );
+    vec_glow_size( 12 );
+    vec_color( 0xFFFFE0A0, 0xFF805020 );
+    x = 320 - ( vec_text_width( "SCORE ", 6 ) + number_width( score, 6 ) + vec_text_width( "    LEVEL ", 6 ) + number_width( level, 6 ) ) / 2;
+    vec_text( "SCORE", x, 178, 6 );
+    x += vec_text_width( "SCORE ", 6 );
+    vec_number( score, x, 178, 6 );
+    x += number_width( score, 6 ) + vec_text_width( "    ", 6 );
+    vec_text( "LEVEL", x, 178, 6 );
+    vec_number( level, x + vec_text_width( "LEVEL ", 6 ), 178, 6 );
+    vec_intensity( t );
 
     if( save_message != SAVE_MSG_NONE ) draw_save_message( 262 );
 
@@ -3080,9 +3168,57 @@ void draw_game_over()
         vec_thickness( 2 );
         vec_glow_size( 14 );
         vec_color( TEXT_CORE, TEXT_GLOW );
-        vec_text_centered( "PRESS START", 320, 220, 8 );
+        vec_text_centered( "PRESS START", 320, 222, 8 );
     }
     vec_intensity( 1 );
+}
+
+// SECRETS 2 OF 4   SPIN CYCLE   ?????   ?????   SWARM
+void draw_secrets_line( float y )
+{
+    int k, n = 0;
+    float x, w = 0, gap = 18;
+    int* name;
+
+    for( k = 0; k < 4; k++ )
+      if( secrets_ever & ( 1 << k ) ) n++;
+
+    // measure, to centre the line
+    w = vec_text_width( "SECRETS ", 4.5 ) + number_width( n, 4.5 ) + vec_text_width( " OF 4", 4.5 );
+    for( k = 0; k < 4; k++ )
+    {
+        name = "?????";
+        if( secrets_ever & ( 1 << k ) ) name = secret_name( k );
+        w += gap + vec_text_width( name, 4.5 );
+    }
+    x = 320 - w / 2;
+
+    vec_thickness( 1.5 );
+    vec_glow_size( 0 );        // the scores page is close to its line budget
+    vec_color( 0xFF40D0FF, 0 );
+    vec_text( "SECRETS", x, y, 4.5 );
+    x += vec_text_width( "SECRETS ", 4.5 );
+    vec_number( n, x, y, 4.5 );
+    x += number_width( n, 4.5 );
+    vec_text( " OF 4", x, y, 4.5 );
+    x += vec_text_width( " OF 4", 4.5 );
+
+    for( k = 0; k < 4; k++ )
+    {
+        x += gap;
+        if( secrets_ever & ( 1 << k ) )
+        {
+            name = secret_name( k );
+            vec_color( 0xFFFFFFFF, 0 );
+        }
+        else
+        {
+            name = "?????";
+            vec_color( 0xFF806868, 0 );
+        }
+        vec_text( name, x, y, 4.5 );
+        x += vec_text_width( name, 4.5 );
+    }
 }
 
 void draw_scores_page()
@@ -3143,9 +3279,11 @@ void draw_scores_page()
         }
     }
 
+    vec_intensity( t * fmin( 1.0, fmax( 0.0, ( state_timer - 50 ) / 20.0 ) ) );
+    draw_secrets_line( 292 );
     vec_intensity( t );
 
-    if( save_message != SAVE_MSG_NONE && highlight_rank >= 0 ) draw_save_message( 312 );
+    if( save_message != SAVE_MSG_NONE && highlight_rank >= 0 ) draw_save_message( 314 );
     else if( ( frame / 30 ) % 2 == 0 )
     {
         vec_thickness( 2 );
@@ -3363,6 +3501,87 @@ void draw_options()
     vec_intensity( 1 );
 }
 
+// brightness of the world while playing: the dive fades to black near the
+// far end, and a new web (or secret stage) fades in as the camera arrives
+float scene_fade()
+{
+    if( phase == PHASE_WARP ) return fmax( 0.0, fmin( 1.0, ( DEPTH + 0.5 - claw_z ) / 0.9 ) );
+    if( phase == PHASE_FLYIN || ( phase == PHASE_BONUS && bonus_end_timer == 0 ) )
+      return fmin( 1.0, phase_timer / 25.0 );
+    return 1.0;
+}
+
+// a flipper or fuseball on the rim right next to the claw, about to strike
+bool claw_in_danger()
+{
+    int i, d;
+    float edge;
+
+    if( phase != PHASE_FIGHT ) return false;
+    for( i = 0; i < MAX_ENEMIES; i++ )
+    {
+        if( !en_active[ i ] || en_state[ i ] != ES_RIM ) continue;
+        if( en_type[ i ] == EN_FLIPPER )
+        {
+            if( en_flip_to[ i ] == claw_lane ) return true;
+            d = lane_delta( en_lane[ i ], claw_lane );
+            if( d == 1 || d == -1 ) return true;
+        }
+        else if( en_type[ i ] == EN_FUSEBALL )
+        {
+            // sitting on one of the claw lane's edges, or crossing toward it
+            if( en_lane[ i ] == claw_lane ) return true;
+            edge = en_lane[ i ] + en_side[ i ];
+            if( lane_wrap( en_lane[ i ] + 1 ) == claw_lane && en_side[ i ] >= 0.5 ) return true;
+            if( lane_wrap( en_lane[ i ] - 1 ) == claw_lane && en_side[ i ] <= 0.5 ) return true;
+        }
+    }
+    return false;
+}
+
+bool danger_was = false;
+
+// a low warning ping when the danger starts (sound only, so replays are unaffected)
+void update_danger_sound()
+{
+    bool now = in_game() && !paused && claw_in_danger();
+    if( now && !danger_was ) sfx_pitched( SND_SPIKE_HIT, 0.35, 0.5 );
+    danger_was = now;
+}
+
+// -----------------------------------------------------------------------------
+//   MUSIC: which track belongs to what's on screen
+// -----------------------------------------------------------------------------
+
+void update_music()
+{
+    int current = music_current();
+
+    // title pages, attract demo, initials, options from the title
+    if( state == STATE_TITLE || state == STATE_DEMO || state == STATE_ENTRY
+        || ( state == STATE_OPTIONS && !options_from_pause ) )
+    {
+        if( current != MUSIC_TITLE ) play_track( MUSIC_TITLE, 0.45 );
+        return;
+    }
+
+    // game over: the sting, then the title theme softly
+    if( state == STATE_GAMEOVER )
+    {
+        if( current == -1 ) play_track( MUSIC_TITLE, 0.3 );
+        return;
+    }
+
+    // in a game: the secret stage has its own loop; jingles finish first
+    if( phase == PHASE_BONUS && bonus_end_timer == 0 )
+    {
+        if( current != MUSIC_SECRET ) play_track( MUSIC_SECRET, 0.5 );
+        return;
+    }
+    if( current == MUSIC_CLEAR ) return;
+    if( current != MUSIC_GAME ) play_track( MUSIC_GAME, 0.5 );
+}
+
 // -----------------------------------------------------------------------------
 //   MAIN
 // -----------------------------------------------------------------------------
@@ -3443,6 +3662,8 @@ void main()
 
         if( !paused )
         {
+            update_danger_sound();
+            update_music();
             music_update();
             update_particles();
             shake *= 0.86;
@@ -3465,6 +3686,7 @@ void main()
         if( menu_screen ) vec_intensity( 0.55 );
         if( state == STATE_OPTIONS || state == STATE_ENTRY ) vec_intensity( 0.3 );
         if( state == STATE_TITLE && title_page == PAGE_SCORES ) vec_intensity( 0.3 );
+        if( !menu_screen && in_game() && !paused ) vec_intensity( scene_fade() );
 
         draw_stars();
         if( state != STATE_OPTIONS ) draw_web();      // the options text needs the line budget

@@ -643,6 +643,13 @@ void vec_char( int c, float x, float y, float size )
     else if( c == '-' )             mask = 0x00C0;
     else if( c == '+' )             mask = 0x12C0;
     else if( c == '/' )             mask = 0x0C00;
+    else if( c == '?' )
+    {
+        // top, upper right and half the middle, then a short stem and a dot
+        mask = 0x0083;
+        vec_line( x + 0.5 * size, y + 1.0 * size, x + 0.5 * size, y + 1.45 * size );
+        vec_line( x + 0.5 * size, y + 1.85 * size, x + 0.5 * size, y + 2.0 * size );
+    }
     else if( c == '.' || c == ':' )
     {
         // small dots

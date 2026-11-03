@@ -16,7 +16,8 @@
 //     music_init( first_instrument_sound, first_channel );
 //     music_play( MUSIC_TITLE, 0.6 );   // same track again: keeps playing
 //     music_update();                   // once per frame, not while paused
-//     music_stop();  music_is_playing();
+//     music_stop();  music_is_playing();  music_current();
+//     music_position();  music_play_at( track, volume, frame );   // resume
 //
 //   The engine uses up to MUSIC_VOICES consecutive channels starting at
 //   first_channel; keep sound effects off those.
@@ -108,6 +109,42 @@ void music_stop()
 bool music_is_playing()
 {
     return mus_playing;
+}
+
+// the track playing now, or -1
+int music_current()
+{
+    if( !mus_playing ) return -1;
+    return mus_track;
+}
+
+// frames into the current track (to resume it later with music_play_at)
+int music_position()
+{
+    return mus_time;
+}
+
+// starts a track part way through: each voice skips to its first note at
+// or after that frame (notes already sounding there are not restarted)
+void music_play_at( int track, float volume, int time )
+{
+    int v, first, count, k;
+
+    mus_volume = volume;
+    music_stop_voices();
+    mus_track = track;
+    mus_playing = true;
+    if( time < 0 || time >= mus_track_length[ track ] ) time = 0;
+    mus_time = time;
+
+    for( v = 0; v < MUSIC_VOICES; v++ )
+    {
+        first = mus_voice_first[ track * MUSIC_VOICES + v ];
+        count = mus_voice_count[ track * MUSIC_VOICES + v ];
+        k = 0;
+        while( k < count && ( mus_events[ ( first + k ) * 2 ] & 0xFFFF ) < time ) k++;
+        mus_ptr[ v ] = k;
+    }
 }
 
 void music_set_volume( float volume )
